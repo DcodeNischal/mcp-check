@@ -176,11 +176,17 @@ export async function searchServers(env: SearchEnv, q: SearchQuery): Promise<Sea
  */
 export async function backfillToolsText(db: D1Database, limit = 10): Promise<number> {
   await ensureSchema(db)
+  // Once a pass finds nothing for the current grading rules, stop scanning until they change.
+  const done = await db.prepare(`SELECT value FROM settings WHERE key = 'backfill_done'`).first<string>('value')
+  if (done === String(GRADING_VERSION)) return 0
   const { results } = await db
     .prepare(`SELECT id, report FROM servers WHERE (tools_text IS NULL OR issues IS NULL OR grading_version < ?2) AND listed = 1 AND blocked = 0 LIMIT ?1`)
     .bind(limit, GRADING_VERSION)
     .all<{ id: string; report: ArrayBuffer | number[] }>()
-  if (!results.length) return 0
+  if (!results.length) {
+    await db.prepare(`INSERT INTO settings (key, value) VALUES ('backfill_done', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1`).bind(String(GRADING_VERSION)).run()
+    return 0
+  }
   const statements: D1PreparedStatement[] = []
   for (const row of results) {
     const bytes = row.report instanceof ArrayBuffer ? new Uint8Array(row.report) : Uint8Array.from(row.report)
@@ -200,7 +206,8 @@ export async function embedPending(env: SearchEnv, limit = EMBED_BATCH): Promise
   if (!env.AI || !env.VECTORS) return 0
   await ensureSchema(env.DB)
   const { results } = await env.DB
-    .prepare(`SELECT id, name, registry_name, description, tools_text FROM servers
+    // The partial index holds only servers waiting to be embedded, so this reads just those.
+    .prepare(`SELECT id, name, registry_name, description, tools_text FROM servers INDEXED BY servers_embed_stale
               WHERE embed_stale = 1 AND listed = 1 AND blocked = 0 AND tools_text IS NOT NULL LIMIT ?1`)
     .bind(limit)
     .all<{ id: string; name: string | null; registry_name: string | null; description: string | null; tools_text: string | null }>()

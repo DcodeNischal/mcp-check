@@ -195,6 +195,15 @@ const MIGRATIONS: string[][] = [
       INSERT INTO events (server_id, type, grade, prev_grade, score, prev_score, at) VALUES (new.id, 'grade_changed', new.grade, old.grade, new.score, old.score, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
     END`,
   ],
+  [
+    // Indexes for the queries that run every minute or on every directory view, so each reads a
+    // handful of rows instead of whole tables (the free plan allows 5M rows read a day).
+    `CREATE INDEX IF NOT EXISTS registry_queue ON registry (status, attempts, first_seen_at)`,
+    `CREATE INDEX IF NOT EXISTS servers_embed_stale ON servers (id) WHERE embed_stale = 1`,
+    `CREATE INDEX IF NOT EXISTS servers_directory ON servers (listed, blocked, grade, partial, score DESC, name)`,
+    `CREATE INDEX IF NOT EXISTS servers_recent ON servers (listed, blocked, checked_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS servers_recheck ON servers (COALESCE(last_attempt_at, checked_at)) WHERE listed = 1 AND blocked = 0 AND authenticated = 0`,
+  ],
 ]
 
 async function migrate(db: D1Database) {
@@ -373,7 +382,7 @@ export async function listedIds(db: D1Database): Promise<{ id: string; checked_a
 export async function dueForRecheck(db: D1Database, olderThan: string, retryAfter: string, limit: number): Promise<{ id: string; url: string }[]> {
   await ensureSchema(db)
   const { results } = await db
-    .prepare(`SELECT id, url FROM servers WHERE listed = 1 AND blocked = 0 AND authenticated = 0 AND checked_at < ?1
+    .prepare(`SELECT id, url FROM servers INDEXED BY servers_recheck WHERE listed = 1 AND blocked = 0 AND authenticated = 0 AND checked_at < ?1
               AND (last_attempt_at IS NULL OR last_attempt_at < ?2) ORDER BY COALESCE(last_attempt_at, checked_at) ASC LIMIT ?3`)
     .bind(olderThan, retryAfter, limit)
     .all<{ id: string; url: string }>()

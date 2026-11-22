@@ -9,7 +9,7 @@ import { gradeBadge, unknownBadge } from './badge'
 import { atomFeed, deliverPending, pruneEvents, recentEvents, subscribe, unsubscribe, WebhookError } from './alerts'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
 import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, type QueuedServer } from './registry'
-import { directoryStats } from './stats'
+import { refreshStatsIfDue, storedStats } from './stats'
 import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
 import { checkTarget } from '../security/target'
@@ -172,9 +172,16 @@ app.get('/api/servers', async (c) => {
   const page = Math.min(1000, Math.max(1, Number.parseInt(c.req.query('page') ?? '1', 10) || 1))
   const gradeFilter = /^[ABCDF]$/.test(grade) ? { grade } : {}
   if (!search) {
+    // Cached at the edge for a minute: every view would otherwise count the whole directory.
+    const pageCache = (caches as unknown as { default: Cache }).default
+    const pageKey = new Request(new URL(`/api/servers?${new URLSearchParams({ sort: sortParam === 'recent' ? 'recent' : 'grade', page: String(page), grade })}`, c.req.url))
+    const cached = await pageCache.match(pageKey)
+    if (cached) return cached
     const sort = sortParam === 'recent' ? 'recent' : 'grade'
     const result = await listServers(c.env.DB, { sort, page, ...gradeFilter })
-    return c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
+    const res = c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
+    c.executionCtx.waitUntil(pageCache.put(pageKey, res.clone()))
+    return res
   }
 
   // Searches cost an embedding each, so identical ones are answered from the edge cache for a minute.
@@ -219,14 +226,14 @@ app.post('/api/unlist', async (c) => {
 })
 
 // Progress of the registry import and the directory size.
-// Public numbers about the directory. Other sites may read them (the launch post on
-// nischaldhakal.com.np shows them live), and they're cached at the edge for five minutes.
+// Public numbers about the directory, refreshed every 30 minutes by the cron run. Other sites may
+// read them (the launch post on nischaldhakal.com.np shows them live).
 app.get('/api/stats', async (c) => {
   const cache = (caches as unknown as { default: Cache }).default
   const key = new Request(new URL('/api/stats', c.req.url))
   const hit = await cache.match(key)
   if (hit) return hit
-  const res = c.json(await directoryStats(c.env.DB), 200, { 'Cache-Control': 'public, max-age=300', 'Access-Control-Allow-Origin': '*' })
+  const res = c.json(await storedStats(c.env.DB), 200, { 'Cache-Control': 'public, max-age=300', 'Access-Control-Allow-Origin': '*' })
   c.executionCtx.waitUntil(cache.put(key, res.clone()))
   return res
 })
@@ -371,6 +378,7 @@ async function tick(env: Env) {
     (n) => n && console.log('embedded', n),
     (err) => console.error('embedding failed', String(err)),
   )
+  await refreshStatsIfDue(env.DB).catch((err) => console.error('stats failed', String(err)))
   if (await syncDue(env.DB)) {
     await syncStep(env.DB).then(
       (step) => console.log('registry sync', step),

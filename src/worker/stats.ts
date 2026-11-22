@@ -32,6 +32,33 @@ export interface DirectoryStats {
 
 const LISTED = `listed = 1 AND blocked = 0`
 
+const STATS_EVERY_MS = 30 * 60 * 1000
+
+/**
+ * The stored stats, refreshed by the cron run every 30 minutes (counting the whole registry reads
+ * thousands of rows, too many to do on every request). Computed on the spot only if none exist yet.
+ */
+export async function storedStats(db: D1Database): Promise<DirectoryStats> {
+  await ensureSchema(db)
+  const row = await db.prepare(`SELECT value FROM settings WHERE key = 'directory_stats'`).first<string>('value')
+  return row ? (JSON.parse(row) as DirectoryStats) : refreshStats(db)
+}
+
+/** Recompute and store the stats if they're older than 30 minutes. Returns true if it did. */
+export async function refreshStatsIfDue(db: D1Database): Promise<boolean> {
+  const row = await db.prepare(`SELECT value FROM settings WHERE key = 'directory_stats'`).first<string>('value')
+  const at = row ? Date.parse((JSON.parse(row) as DirectoryStats).updatedAt) : 0
+  if (Date.now() - at < STATS_EVERY_MS) return false
+  await refreshStats(db)
+  return true
+}
+
+async function refreshStats(db: D1Database): Promise<DirectoryStats> {
+  const stats = await directoryStats(db)
+  await db.prepare(`INSERT INTO settings (key, value) VALUES ('directory_stats', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1`).bind(JSON.stringify(stats)).run()
+  return stats
+}
+
 export async function directoryStats(db: D1Database): Promise<DirectoryStats> {
   await ensureSchema(db)
   const [totals, grades, versions, issues] = await db.batch([

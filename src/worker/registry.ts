@@ -148,7 +148,7 @@ export async function nextCandidates(db: D1Database, count: number): Promise<Que
               FROM registry r LEFT JOIN servers s ON s.id = r.id
               WHERE r.status = 'pending' AND (r.last_attempt_at IS NULL OR r.last_attempt_at < ?1)
                 AND (s.id IS NULL OR s.blocked = 0)
-              ORDER BY r.attempts ASC, r.first_seen_at ASC LIMIT 50`)
+              ORDER BY r.attempts ASC, r.first_seen_at ASC LIMIT 10`)
     .bind(retryBefore)
     .all<{ url: string; id: string; host: string; registry_name: string; title: string | null; description: string | null; version: string | null; repository_url: string | null; website_url: string | null; attempts: number }>()
   return pickHosts(results, lastHost, count).map((row) => ({
