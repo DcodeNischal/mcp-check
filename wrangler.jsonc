@@ -21,9 +21,10 @@
   ],
   // Turnstile tokens must come from this hostname. The secret is a Worker secret (TURNSTILE_SECRET).
   "vars": { "TURNSTILE_HOSTNAMES": "mcp.nischaldhakal.com.np" },
-  // Four runs a minute, one job each (see tick in src/worker/index.ts). They're the same schedule
-  // written four ways, because each trigger needs a distinct expression. The free plan allows five
-  // cron triggers per account; the website uses the fifth.
-  "triggers": { "crons": ["* * * * *", "*/1 * * * *", "0-59 * * * *", "0-59/1 * * * *"] },
+  // Once a minute: search upkeep, registry sync, and checks of queued servers (see tick in src/worker/index.ts).
+  "triggers": { "crons": ["* * * * *"] },
+  // A binding to this Worker's own Checker entrypoint: the cron run checks several servers at once,
+  // each as its own invocation. It's an RPC method, not an HTTP route, so it can't be called from outside.
+  "services": [{ "binding": "CHECKER", "service": "mcp-check", "entrypoint": "Checker" }],
   "observability": { "enabled": true }
 }

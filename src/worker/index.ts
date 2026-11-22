@@ -1,4 +1,5 @@
 // The Worker: serves the API. Static files (the app) are served by Cloudflare before this runs.
+import { WorkerEntrypoint } from 'cloudflare:workers'
 import { Hono } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { runTool } from '../checks/call'
@@ -21,6 +22,8 @@ export interface Env extends TurnstileEnv {
   VECTORS?: Vectorize
   CHECK_LIMITER: RateLimit
   ASSETS: Fetcher
+  /** This Worker's own Checker entrypoint, so each queued check runs as its own invocation. */
+  CHECKER?: Service<Checker>
 }
 
 const app = new Hono<{ Bindings: Env }>()
@@ -297,38 +300,39 @@ async function withMeta(env: Env, requestUrl: string, m: { title: string; descri
   return new Response(rewritten.body, { status: 200, headers })
 }
 
-// Four cron triggers fire every minute, each its own run with its own CPU budget (the free plan
-// allows five per account). Each run does one job:
-// - the main trigger does search upkeep (tool text for older reports, embeddings for changed
-//   servers), then: while a registry sync is in progress, even minutes read one page of the
-//   registry and odd minutes check one queued server; otherwise it checks one queued server; and
-//   when the queue is empty, it re-checks one listed server whose report is over a week old;
-// - the other triggers each check one queued server, so the queue empties four times faster.
-export const MAIN_CRON = '* * * * *'
+// The cron trigger fires once a minute. Each run:
+// 1. does search upkeep (tool text for older reports, embeddings for changed servers);
+// 2. reads one page of the registry while a sync is in progress;
+// 3. checks up to CHECKERS queued servers at once, each through the Checker entrypoint, so every
+//    check is its own invocation with its own CPU budget (one run alone has 10 ms on the free plan);
+// 4. when the queue is empty, re-checks one listed server whose report is over a week old.
+const CHECKERS = 4
 
-async function tick(env: Env, scheduledTime = Date.now(), cron = MAIN_CRON) {
-  if (cron !== MAIN_CRON) {
-    await checkNext(env)
-    return
-  }
+async function tick(env: Env) {
   // Search upkeep first. Both are cheap and finish quickly once the indexes are current.
   if (await backfillToolsText(env.DB)) return
   await embedPending(env).then(
     (n) => n && console.log('embedded', n),
     (err) => console.error('embedding failed', String(err)),
   )
-  const syncing = await syncDue(env.DB)
-  const evenMinute = Math.floor(scheduledTime / 60_000) % 2 === 0
-  if (syncing && evenMinute) {
-    console.log('registry sync', await syncStep(env.DB))
-    return
+  if (await syncDue(env.DB)) {
+    await syncStep(env.DB).then(
+      (step) => console.log('registry sync', step),
+      (err) => console.error('registry sync failed', String(err)),
+    )
   }
-  if (await checkNext(env)) return
-  if (syncing) {
-    console.log('registry sync', await syncStep(env.DB))
-    return
+  // Without the binding (tests, misconfiguration), check one server in this run instead.
+  const checker = env.CHECKER
+  const runs = checker ? Array.from({ length: CHECKERS }, () => checker.checkNext()) : [checkNext(env)]
+  const checked = await Promise.all(runs.map((r) => Promise.resolve(r).catch((err) => (console.error('checker failed', String(err)), false))))
+  if (!checked.some(Boolean)) await recheck(env)
+}
+
+/** Checks one queued server per call. The cron run calls it through a service binding to itself. */
+export class Checker extends WorkerEntrypoint<Env> {
+  async checkNext(): Promise<boolean> {
+    return checkNext(this.env)
   }
-  await recheck(env)
 }
 
 /** Check the next queued server that no other run has claimed. False when the queue is empty. */
@@ -385,7 +389,7 @@ function trimLog(log: Exchange[]): Exchange[] {
 
 export default {
   fetch: app.fetch,
-  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(tick(env, controller.scheduledTime, controller.cron).catch((err) => console.error('tick failed', String(err))))
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(tick(env).catch((err) => console.error('tick failed', String(err))))
   },
 } satisfies ExportedHandler<Env>
