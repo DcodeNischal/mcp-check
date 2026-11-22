@@ -23,6 +23,8 @@ export interface DirectoryStats {
   /** Spec versions spoken by the servers that could be inspected, most common first. */
   versions: { version: string; servers: number }[]
   tools: { average: number; max: number }
+  /** Graded servers whose warnings and failures are on record: the base for issue shares. */
+  issuesBase: number
   /** The most common warnings and failures among graded servers. */
   issues: { id: string; title: string; servers: number; failing: number }[]
   registry: Record<string, number>
@@ -33,7 +35,7 @@ const LISTED = `listed = 1 AND blocked = 0`
 export async function directoryStats(db: D1Database): Promise<DirectoryStats> {
   await ensureSchema(db)
   const [totals, grades, versions, issues] = await db.batch([
-    db.prepare(`SELECT COUNT(*) AS listed, SUM(partial = 0) AS graded, SUM(partial) AS sign_in,
+    db.prepare(`SELECT COUNT(*) AS listed, SUM(partial = 0) AS graded, SUM(partial) AS sign_in, SUM(partial = 0 AND issues IS NOT NULL) AS issues_base,
                        AVG(CASE WHEN partial = 0 THEN tools_count END) AS avg_tools, MAX(tools_count) AS max_tools
                 FROM servers WHERE ${LISTED}`),
     db.prepare(`SELECT grade, COUNT(*) AS n FROM servers WHERE ${LISTED} AND partial = 0 GROUP BY grade`),
@@ -44,7 +46,7 @@ export async function directoryStats(db: D1Database): Promise<DirectoryStats> {
                 WHERE s.listed = 1 AND s.blocked = 0 AND s.partial = 0 AND s.issues IS NOT NULL
                 GROUP BY check_id ORDER BY n DESC LIMIT 8`),
   ])
-  const t = (totals?.results?.[0] ?? {}) as { listed?: number; graded?: number; sign_in?: number; avg_tools?: number | null; max_tools?: number | null }
+  const t = (totals?.results?.[0] ?? {}) as { listed?: number; graded?: number; sign_in?: number; issues_base?: number; avg_tools?: number | null; max_tools?: number | null }
   const gradeCounts: DirectoryStats['grades'] = { A: 0, B: 0, C: 0, D: 0, F: 0 }
   for (const r of (grades?.results ?? []) as { grade: keyof DirectoryStats['grades']; n: number }[]) if (r.grade in gradeCounts) gradeCounts[r.grade] = r.n
   return {
@@ -56,6 +58,7 @@ export async function directoryStats(db: D1Database): Promise<DirectoryStats> {
     grades: gradeCounts,
     versions: ((versions?.results ?? []) as { version: string; n: number }[]).map((r) => ({ version: r.version, servers: r.n })),
     tools: { average: Math.round((t.avg_tools ?? 0) * 10) / 10, max: t.max_tools ?? 0 },
+    issuesBase: t.issues_base ?? 0,
     issues: ((issues?.results ?? []) as { check_id: string; title: string; n: number; failing: number }[]).map((r) => ({ id: r.check_id, title: r.title, servers: r.n, failing: r.failing })),
     registry: await registryStats(db),
   }
