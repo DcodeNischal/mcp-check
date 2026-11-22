@@ -6,9 +6,13 @@ import { toolsText } from './search'
 
 const MAX_RECEIPT_AGE_MS = 60 * 60 * 1000
 
-let schemaReady: Promise<unknown> | undefined
-export function ensureSchema(db: D1Database) {
-  schemaReady ??= db
+// Only finished results are cached at module level, never a promise still in flight: the runtime
+// won't settle a promise in a request other than the one that created it, so a shared in-flight
+// promise whose request ended would leave every later request waiting forever.
+let schemaReady = false
+export async function ensureSchema(db: D1Database): Promise<void> {
+  if (schemaReady) return
+  await db
     .batch([
       db.prepare(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`),
       db.prepare(`CREATE TABLE IF NOT EXISTS servers (
@@ -33,12 +37,8 @@ export function ensureSchema(db: D1Database) {
       )`),
       db.prepare(`CREATE INDEX IF NOT EXISTS servers_listed_grade ON servers (listed, grade, score DESC)`),
     ])
-    .then(() => migrate(db))
-    .catch((err) => {
-      schemaReady = undefined
-      throw err
-    })
-  return schemaReady
+  await migrate(db)
+  schemaReady = true
 }
 
 // Columns added after the first deploy. Each step runs once; "duplicate column" means another
@@ -117,23 +117,19 @@ async function migrate(db: D1Database) {
 
 // --- the signing key, created on first use and kept in D1 ----------------------------------
 
-let keyPromise: Promise<CryptoKey> | undefined
-function signingKey(db: D1Database): Promise<CryptoKey> {
-  keyPromise ??= (async () => {
-    await ensureSchema(db)
-    let secret = await db.prepare(`SELECT value FROM settings WHERE key = 'report_key'`).first<string>('value')
-    if (!secret) {
-      const fresh = base64url(crypto.getRandomValues(new Uint8Array(32)))
-      // If two requests race, INSERT OR IGNORE keeps the first; read back whichever won.
-      await db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES ('report_key', ?)`).bind(fresh).run()
-      secret = (await db.prepare(`SELECT value FROM settings WHERE key = 'report_key'`).first<string>('value')) ?? fresh
-    }
-    return crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
-  })().catch((err) => {
-    keyPromise = undefined
-    throw err
-  })
-  return keyPromise
+let cachedKey: CryptoKey | undefined
+async function signingKey(db: D1Database): Promise<CryptoKey> {
+  if (cachedKey) return cachedKey
+  await ensureSchema(db)
+  let secret = await db.prepare(`SELECT value FROM settings WHERE key = 'report_key'`).first<string>('value')
+  if (!secret) {
+    const fresh = base64url(crypto.getRandomValues(new Uint8Array(32)))
+    // If two requests race, INSERT OR IGNORE keeps the first; read back whichever won.
+    await db.prepare(`INSERT OR IGNORE INTO settings (key, value) VALUES ('report_key', ?)`).bind(fresh).run()
+    secret = (await db.prepare(`SELECT value FROM settings WHERE key = 'report_key'`).first<string>('value')) ?? fresh
+  }
+  cachedKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
+  return cachedKey
 }
 
 export interface Receipt {
