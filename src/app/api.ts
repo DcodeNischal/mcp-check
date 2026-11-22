@@ -30,8 +30,24 @@ export interface Target {
   headers: Record<string, string>
 }
 
+export interface Receipt {
+  payload: string
+  sig: string
+}
+
 export const checkServer = (target: Target, token: string) =>
-  post<{ ok: true; report: Report; log: Exchange[] }>('/api/check', { ...target, token })
+  post<{ ok: true; report: Report; log: Exchange[]; receipt?: Receipt }>('/api/check', { ...target, token })
+
+export const shareReport = (receipt: Receipt) =>
+  post<{ ok: true; id: string; reportUrl: string; badgeUrl: string }>('/api/share', { receipt })
+
+export async function getReport(id: string): Promise<Report | null> {
+  const res = await fetch(`/api/report/${encodeURIComponent(id)}`, { headers: { Accept: 'application/json' } })
+  if (res.status === 404) return null
+  const data = (await res.json().catch(() => null)) as { ok?: boolean; report?: Report } | null
+  if (!res.ok || !data?.report) throw new ApiError('This report could not be loaded.', 'server')
+  return data.report
+}
 
 export const callTool = (target: Target, tool: string, args: Record<string, unknown>, token: string) =>
   post<CallOutcome>('/api/call', { ...target, tool, arguments: args, token })

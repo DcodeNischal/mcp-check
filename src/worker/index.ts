@@ -3,6 +3,8 @@ import { Hono } from 'hono'
 import { runTool } from '../checks/call'
 import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
+import { gradeBadge, unknownBadge } from './badge'
+import { canonicalUrl, loadGrade, loadReport, saveReport, serverId, signReport, touch, verifyReceipt } from './store'
 import { verifyTurnstile, type TurnstileEnv } from './turnstile'
 
 export interface Env extends TurnstileEnv {
@@ -64,7 +66,9 @@ app.post('/api/check', async (c) => {
   if (g.fail) return c.json({ ok: false, error: g.fail.error, message: g.fail.message }, g.fail.status)
   const log: Exchange[] = []
   const report = await runCheck(g.body.url as string, { headers: g.headers, vantage: VANTAGE, logSink: log })
-  return c.json({ ok: true, report, log: trimLog(log) }, 200, { 'Cache-Control': 'no-store' })
+  // A signed copy the visitor can hand back to /api/share: proof this Worker produced the grade.
+  const receipt = report.connected || report.auth ? await signReport(c.env.DB, report) : undefined
+  return c.json({ ok: true, report, log: trimLog(log), receipt }, 200, { 'Cache-Control': 'no-store' })
 })
 
 app.post('/api/call', async (c) => {
@@ -77,9 +81,86 @@ app.post('/api/call', async (c) => {
   return c.json({ ...outcome, log: trimLog(outcome.log) }, 200, { 'Cache-Control': 'no-store' })
 })
 
+app.post('/api/share', async (c) => {
+  const ip = c.req.header('CF-Connecting-IP')
+  const { success } = await c.env.CHECK_LIMITER.limit({ key: ip ?? 'unknown' })
+  if (!success) return c.json({ ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' }, 429)
+  const body = (await c.req.json().catch(() => null)) as { receipt?: unknown } | null
+  const verified = await verifyReceipt(c.env.DB, body?.receipt)
+  if (!verified.ok) return c.json({ ok: false, error: 'invalid', message: verified.reason }, 400)
+  const report = verified.report
+  if (!report.connected && !report.auth) return c.json({ ok: false, error: 'invalid', message: "Reports for servers that couldn't be reached can't be shared." }, 400)
+  const canonical = canonicalUrl(report.url)
+  if (!canonical.ok) return c.json({ ok: false, error: 'invalid', message: canonical.reason }, 400)
+  const id = await serverId(canonical.url)
+  await saveReport(c.env.DB, id, canonical.url, report)
+  const origin = new URL(c.req.url).origin
+  return c.json({ ok: true, id, reportUrl: `${origin}/r/${id}`, badgeUrl: `${origin}/badge/${id}.svg` })
+})
+
+app.get('/api/report/:id', async (c) => {
+  const id = c.req.param('id')
+  if (!ID.test(id)) return c.json({ ok: false, error: 'not-found' }, 404)
+  const found = await loadReport(c.env.DB, id)
+  if (!found) return c.json({ ok: false, error: 'not-found', message: 'No report with this id.' }, 404)
+  c.executionCtx.waitUntil(touch(c.env.DB, found.meta).catch(() => {}))
+  return c.json({ ok: true, id, report: found.report }, 200, { 'Cache-Control': 'public, max-age=60' })
+})
+
 app.all('/api/*', (c) => c.json({ ok: false, error: 'not-found' }, 404))
 
+// README badge. GitHub caches images through its own proxy, so this is fetched rarely.
+app.get('/badge/:file', async (c) => {
+  const id = c.req.param('file').replace(/\.svg$/, '')
+  const row = ID.test(id) ? await loadGrade(c.env.DB, id) : undefined
+  const svg = row ? gradeBadge(row.grade, row.score, !!row.partial) : unknownBadge()
+  return c.body(svg, 200, { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'public, max-age=3600, s-maxage=3600' })
+})
+
+// Shared report pages: the app, with a title and share-preview tags for this report.
+app.get('/r/:id', async (c) => {
+  const id = c.req.param('id')
+  const page = await c.env.ASSETS.fetch(new Request(new URL('/', c.req.url)))
+  const found = ID.test(id) ? await loadReport(c.env.DB, id).catch(() => undefined) : undefined
+  if (!found) return new Response(page.body, { status: 404, headers: page.headers })
+
+  const { report } = found
+  const origin = new URL(c.req.url).origin
+  const name = report.serverInfo?.title ?? report.serverInfo?.name ?? new URL(report.url).hostname
+  const problems = report.checks.filter((x) => x.status === 'fail' || x.status === 'warn').length
+  const title = `${name}: grade ${report.grade} (${report.score}/100) · MCP Check`
+  const description = `${report.partial ? 'Partial grade (sign-in needed for tools). ' : ''}${report.tools.length} tools · spec ${report.version ?? 'unknown'} · ${problems ? `${problems} thing${problems === 1 ? '' : 's'} to fix` : 'no issues found'}. Checked ${report.checkedAt.slice(0, 10)}.`
+  const meta: [string, string, string][] = [
+    ['name', 'description', description],
+    ['property', 'og:type', 'website'],
+    ['property', 'og:site_name', 'MCP Check'],
+    ['property', 'og:title', title],
+    ['property', 'og:description', description],
+    ['property', 'og:url', `${origin}/r/${id}`],
+    ['property', 'og:image', `${origin}/og/grade-${report.grade}.png`],
+    ['property', 'og:image:width', '1200'],
+    ['property', 'og:image:height', '630'],
+    ['name', 'twitter:card', 'summary_large_image'],
+  ]
+  const tags = meta.map(([attr, key, value]) => `<meta ${attr}="${key}" content="${escapeAttr(value)}">`).join('') + `<link rel="canonical" href="${origin}/r/${id}">`
+  const rewritten = new HTMLRewriter()
+    .on('title', { element: (el) => { el.setInnerContent(title) } })
+    // Drop the home page's own description and preview tags; this report's replace them.
+    .on('meta[name="description"], meta[property^="og:"], meta[name^="twitter:"], link[rel="canonical"]', { element: (el) => { el.remove() } })
+    .on('head', { element: (el) => { el.append(tags, { html: true }) } })
+    .transform(new Response(page.body, page))
+  const headers = new Headers(rewritten.headers)
+  headers.set('Cache-Control', 'public, max-age=60')
+  return new Response(rewritten.body, { status: 200, headers })
+})
+
 /** Keep the raw log useful but bounded: oversized message bodies become a preview. */
+const ID = /^[a-z2-9]{12}$/
+
+function escapeAttr(s: string): string {
+  return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!)
+}
+
 function trimLog(log: Exchange[]): Exchange[] {
   const PER_MESSAGE = 64 * 1024
   return log.map((e) => ({

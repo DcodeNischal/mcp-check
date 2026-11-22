@@ -44,7 +44,7 @@ npm run build
 - [x] Graded checks with fix advice
 - [x] Checker interface, explorer (run tools), raw message log
 - [x] Turnstile and abuse protection for the public API
-- [ ] Shareable reports and README badges
+- [x] Shareable reports and README badges
 - [ ] Public directory with server pages and nightly re-checks
 - [ ] OAuth sign-in to inspect protected servers
 - [ ] `npx mcp-check` CLI and GitHub Action

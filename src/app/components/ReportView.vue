@@ -23,6 +23,8 @@
       </dl>
     </div>
 
+    <div v-if="$slots.actions" class="mt-4"><slot name="actions" /></div>
+
     <p v-if="report.error" role="alert" class="mt-4 rounded-xl border border-rose-400/30 bg-rose-400/[0.06] px-5 py-4 text-sm text-rose-200">{{ report.error }}</p>
 
     <!-- Tabs -->
@@ -85,7 +87,7 @@ import type { Exchange, Report, Target } from '../api'
 import RawLog from './RawLog.vue'
 import ToolsPanel from './ToolsPanel.vue'
 
-const props = defineProps<{ report: Report; log: Exchange[]; target: Target }>()
+const props = withDefaults(defineProps<{ report: Report; log?: Exchange[]; target: Target }>(), { log: () => [] })
 const tab = ref<'checks' | 'tools' | 'more' | 'log'>('checks')
 
 const hostname = computed(() => {
@@ -135,7 +137,8 @@ const tabs = computed(() => [
   { id: 'tools' as const, label: 'Tools', count: props.report.tools.length },
   { id: 'more' as const, label: 'Prompts & resources', count: props.report.prompts.length + props.report.resources.length + props.report.resourceTemplates.length },
   { id: 'log' as const, label: 'Raw log', count: props.log.length },
-])
+  // Shared reports have no raw log (it's never stored).
+].filter((t) => t.id !== 'log' || props.log.length))
 
 const moreSections = computed(() => [
   { title: 'Prompts', items: props.report.prompts.map((p) => ({ key: p.name, description: p.description })) },
