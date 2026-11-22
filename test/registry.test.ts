@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseRegistryPage } from '../src/worker/registry'
+import { parseRegistryPage, pickHosts } from '../src/worker/registry'
 
 const official = (extra: Record<string, unknown> = {}) => ({ 'io.modelcontextprotocol.registry/official': { status: 'active', isLatest: true, ...extra } })
 const entry = (name: string, remotes: unknown[], meta = official(), extra: Record<string, unknown> = {}) => ({ server: { name, title: `${name} title`, description: `${name} does things`, version: '1.0.0', remotes, ...extra }, _meta: meta })
@@ -37,6 +37,14 @@ describe('registry import', () => {
     })
     expect(candidates.map((c) => c.registryName)).toEqual(['optional-header'])
     expect(nextCursor).toBeUndefined()
+  })
+
+  it('picks servers on different hosts, avoiding the last one', () => {
+    const rows = [{ host: 'a' }, { host: 'a' }, { host: 'b' }, { host: 'c' }].map((r, i) => ({ ...r, i }))
+    expect(pickHosts(rows, '', 2).map((r) => r.i)).toEqual([0, 2])
+    expect(pickHosts(rows, 'a', 2).map((r) => r.i)).toEqual([2, 3])
+    expect(pickHosts(rows.slice(0, 2), 'a', 2).map((r) => r.i)).toEqual([0])
+    expect(pickHosts([], 'a', 2)).toEqual([])
   })
 
   it('ignores junk input and unsafe links', () => {

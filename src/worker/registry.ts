@@ -7,7 +7,9 @@ import { checkTarget } from '../security/target'
 import { canonicalUrl, ensureSchema, serverId } from './store'
 
 export const REGISTRY_API = 'https://registry.modelcontextprotocol.io/v0/servers'
-const PAGE_SIZE = 100
+const PAGE_SIZE = 100 // the registry's maximum
+/** Pages read per cron run. One page uses about 7 ms of CPU, and the free plan allows 10 ms a run. */
+const PAGES_PER_RUN = 1
 const SYNC_EVERY_MS = 24 * 60 * 60 * 1000
 
 export interface Candidate {
@@ -87,11 +89,22 @@ export async function syncDue(db: D1Database, now = Date.now()): Promise<boolean
   return !last || now - Date.parse(last) > SYNC_EVERY_MS
 }
 
-/** Read one page of the registry and queue its servers. Returns false when the sync is complete. */
-export async function syncStep(db: D1Database, fetchImpl: typeof fetch = fetch): Promise<{ added: number; done: boolean }> {
+/** Read a few pages of the registry and queue their servers. `done` is true when the sync is complete. */
+export async function syncStep(db: D1Database, fetchImpl: typeof fetch = fetch, pages = PAGES_PER_RUN): Promise<{ added: number; done: boolean }> {
+  let added = 0
+  for (let i = 0; i < pages; i++) {
+    const page = await syncPage(db, fetchImpl)
+    added += page.added
+    if (page.done) return { added, done: true }
+  }
+  return { added, done: false }
+}
+
+async function syncPage(db: D1Database, fetchImpl: typeof fetch): Promise<{ added: number; done: boolean }> {
   await ensureSchema(db)
   const cursor = await setting(db, 'registry_cursor')
-  const qs = new URLSearchParams({ limit: String(PAGE_SIZE), ...(cursor ? { cursor } : {}) })
+  // Only the latest version of each server; older versions would be skipped anyway.
+  const qs = new URLSearchParams({ limit: String(PAGE_SIZE), version: 'latest', ...(cursor ? { cursor } : {}) })
   const res = await fetchImpl(`${REGISTRY_API}?${qs}`, { headers: { Accept: 'application/json', 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(20_000) })
   if (!res.ok) throw new Error(`registry HTTP ${res.status}`)
   const { candidates, nextCursor } = parseRegistryPage(await res.json())
@@ -122,28 +135,39 @@ export interface QueuedServer extends Candidate {
 }
 
 /**
- * The next registry server to check: never checked, or a failed attempt over an hour ago, and not
- * on the same host as the last check (so no one domain gets a burst of checks).
+ * The next registry servers to check: never checked, or a failed attempt over an hour ago. Each is
+ * on a different host, and the host checked last is avoided unless nothing else is left, so no one
+ * domain gets a burst of checks.
  */
-export async function nextCandidate(db: D1Database): Promise<QueuedServer | undefined> {
+export async function nextCandidates(db: D1Database, count: number): Promise<QueuedServer[]> {
   await ensureSchema(db)
   const lastHost = (await setting(db, 'last_check_host')) ?? ''
   const retryBefore = new Date(Date.now() - 60 * 60 * 1000).toISOString()
-  // Prefer a different host; fall back to any host if that's all that's left.
-  const row = (await pick(db, retryBefore, lastHost)) ?? (lastHost ? await pick(db, retryBefore, '') : undefined)
-  if (!row) return undefined
-  return { url: row.url, id: row.id, host: row.host, registryName: row.registry_name, title: row.title, description: row.description, version: row.version, repositoryUrl: row.repository_url, websiteUrl: row.website_url, attempts: row.attempts }
-}
-
-async function pick(db: D1Database, retryBefore: string, excludeHost: string) {
-  return (await db
+  const { results } = await db
     .prepare(`SELECT r.url, r.id, r.host, r.registry_name, r.title, r.description, r.version, r.repository_url, r.website_url, r.attempts
               FROM registry r LEFT JOIN servers s ON s.id = r.id
-              WHERE r.status = 'pending' AND (r.last_attempt_at IS NULL OR r.last_attempt_at < ?1) AND r.host != ?2
+              WHERE r.status = 'pending' AND (r.last_attempt_at IS NULL OR r.last_attempt_at < ?1)
                 AND (s.id IS NULL OR s.blocked = 0)
-              ORDER BY r.attempts ASC, r.first_seen_at ASC LIMIT 1`)
-    .bind(retryBefore, excludeHost)
-    .first<{ url: string; id: string; host: string; registry_name: string; title: string | null; description: string | null; version: string | null; repository_url: string | null; website_url: string | null; attempts: number }>()) ?? undefined
+              ORDER BY r.attempts ASC, r.first_seen_at ASC LIMIT 50`)
+    .bind(retryBefore)
+    .all<{ url: string; id: string; host: string; registry_name: string; title: string | null; description: string | null; version: string | null; repository_url: string | null; website_url: string | null; attempts: number }>()
+  return pickHosts(results, lastHost, count).map((row) => ({
+    url: row.url, id: row.id, host: row.host, registryName: row.registry_name, title: row.title, description: row.description,
+    version: row.version, repositoryUrl: row.repository_url, websiteUrl: row.website_url, attempts: row.attempts,
+  }))
+}
+
+/** Up to `count` rows on different hosts, keeping their order, with `lastHost` only as a last resort. */
+export function pickHosts<T extends { host: string }>(rows: T[], lastHost: string, count: number): T[] {
+  const picked: T[] = []
+  const hosts = new Set<string>()
+  for (const row of [...rows.filter((r) => r.host !== lastHost), ...rows.filter((r) => r.host === lastHost)]) {
+    if (picked.length >= count) break
+    if (hosts.has(row.host)) continue
+    hosts.add(row.host)
+    picked.push(row)
+  }
+  return picked
 }
 
 /** Mark the attempt before checking, so a run that gets cut off doesn't block the queue. */

@@ -4,7 +4,7 @@ import { runTool } from '../checks/call'
 import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
-import { finishAttempt, nextCandidate, registryStats, startAttempt, syncDue, syncStep } from './registry'
+import { finishAttempt, nextCandidates, registryStats, startAttempt, syncDue, syncStep, type QueuedServer } from './registry'
 import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
 import { checkTarget } from '../security/target'
@@ -255,38 +255,45 @@ async function withMeta(env: Env, requestUrl: string, m: { title: string; descri
   return new Response(rewritten.body, { status: 200, headers })
 }
 
-// Every minute, exactly one small job, so each run stays inside the free plan's limits:
-// 1. while a registry sync is due or in progress, read one page of the registry;
-// 2. otherwise check one server from the registry queue and list it if it responds;
-// 3. otherwise re-check one listed server whose report is over a week old.
-async function tick(env: Env) {
+// Every minute, one main job, so each run stays inside the free plan's 10 ms of CPU:
+// - first, search upkeep (tool text for older reports, embeddings for changed servers);
+// - while a registry sync is in progress, even minutes read one page of the registry and odd
+//   minutes check one queued server, so servers get listed while the sync is still going;
+// - otherwise check one queued server and list it if it responds;
+// - when the queue is empty, re-check one listed server whose report is over a week old.
+async function tick(env: Env, scheduledTime = Date.now()) {
   // Search upkeep first. Both are cheap and finish quickly once the indexes are current.
   if (await backfillToolsText(env.DB)) return
   await embedPending(env).then(
     (n) => n && console.log('embedded', n),
     (err) => console.error('embedding failed', String(err)),
   )
-  if (await syncDue(env.DB)) {
-    const step = await syncStep(env.DB)
-    console.log('registry sync', step)
+  const syncing = await syncDue(env.DB)
+  const [candidate] = await nextCandidates(env.DB, 1)
+  const evenMinute = Math.floor(scheduledTime / 60_000) % 2 === 0
+  if (syncing && (evenMinute || !candidate)) {
+    console.log('registry sync', await syncStep(env.DB))
     return
   }
-  const candidate = await nextCandidate(env.DB)
   if (candidate) {
-    await startAttempt(env.DB, candidate)
-    const report = await runCheck(candidate.url, { vantage: VANTAGE })
-    const ok = report.connected || !!report.auth
-    if (ok) {
-      await saveReport(env.DB, candidate.id, candidate.url, report, {
-        list: true,
-        registry: { registryName: candidate.registryName, description: candidate.description, repositoryUrl: candidate.repositoryUrl, websiteUrl: candidate.websiteUrl },
-      })
-    }
-    await finishAttempt(env.DB, candidate, ok)
-    console.log('registry check', candidate.url, ok ? report.grade : 'unreachable')
+    await checkQueued(env, candidate)
     return
   }
   await recheck(env)
+}
+
+async function checkQueued(env: Env, candidate: QueuedServer) {
+  await startAttempt(env.DB, candidate)
+  const report = await runCheck(candidate.url, { vantage: VANTAGE })
+  const ok = report.connected || !!report.auth
+  if (ok) {
+    await saveReport(env.DB, candidate.id, candidate.url, report, {
+      list: true,
+      registry: { registryName: candidate.registryName, description: candidate.description, repositoryUrl: candidate.repositoryUrl, websiteUrl: candidate.websiteUrl },
+    })
+  }
+  await finishAttempt(env.DB, candidate, ok)
+  console.log('registry check', candidate.url, ok ? report.grade : 'unreachable')
 }
 
 // Re-check one listed server whose report is over a week old. Three failures in a row unlist it.
@@ -319,7 +326,7 @@ function trimLog(log: Exchange[]): Exchange[] {
 
 export default {
   fetch: app.fetch,
-  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(tick(env).catch((err) => console.error('tick failed', String(err))))
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(tick(env, controller.scheduledTime).catch((err) => console.error('tick failed', String(err))))
   },
 } satisfies ExportedHandler<Env>
