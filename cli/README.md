@@ -1,10 +1,10 @@
-# mcpcheck
+# @dcodenischal/mcp-check
 
 Grade an MCP server against the current spec, from your terminal or CI. The same checks as
 [MCP Check](https://mcp.nischaldhakal.com.np), run from your machine, so servers on `localhost` work too.
 
 ```bash
-npx mcpcheck https://mcp.example.com/mcp
+npx @dcodenischal/mcp-check https://mcp.example.com/mcp
 ```
 
 ```
@@ -43,7 +43,7 @@ Exit codes: `0` passed, `1` below `--min-grade` or `--min-score`, `2` server unr
 
 ```bash
 npm start &                     # your server
-npx mcpcheck http://localhost:3000/mcp --min-grade B
+npx @dcodenischal/mcp-check http://localhost:3000/mcp --min-grade B
 ```
 
 On GitHub, the [MCP Check action](https://github.com/DcodeNischal/mcp-check#github-action) does the

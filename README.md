@@ -4,7 +4,7 @@ Check, grade and explore any remote [Model Context Protocol](https://modelcontex
 Paste a URL and get an A–F report on protocol compliance, tool quality, OAuth setup, security and speed.
 
 Live at **[mcp.nischaldhakal.com.np](https://mcp.nischaldhakal.com.np)**, in your terminal with
-`npx mcpcheck <url>`, and in CI as a [GitHub Action](#github-action). Built by
+`npx @dcodenischal/mcp-check <url>`, and in CI as a [GitHub Action](#github-action). Built by
 [Nischal Dhakal](https://nischaldhakal.com.np).
 
 ## What it checks
@@ -90,9 +90,9 @@ cached at the edge for a minute.
 ## Command line
 
 ```bash
-npx mcpcheck https://mcp.example.com/mcp
-npx mcpcheck http://localhost:3000/mcp --min-grade B     # fail (exit 1) below a B
-MCP_CHECK_TOKEN=... npx mcpcheck https://mcp.example.com/mcp --markdown
+npx @dcodenischal/mcp-check https://mcp.example.com/mcp
+npx @dcodenischal/mcp-check http://localhost:3000/mcp --min-grade B     # fail (exit 1) below a B
+MCP_CHECK_TOKEN=... npx @dcodenischal/mcp-check https://mcp.example.com/mcp --markdown
 ```
 
 The same checks as the website, run from your machine, so servers on `localhost` and plain `http` work
@@ -148,7 +148,7 @@ npm run build
 - [x] Automatic import from the official MCP Registry
 - [x] Hybrid search: keywords and meaning
 - [x] OAuth sign-in to inspect protected servers
-- [x] `npx mcpcheck` command line and GitHub Action
+- [x] `npx @dcodenischal/mcp-check` command line and GitHub Action
 - [ ] Webhook and RSS alerts
 
 ## License

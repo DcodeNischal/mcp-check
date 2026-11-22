@@ -40,9 +40,9 @@ Exit codes: 0 passed, 1 below --min-grade or --min-score, 2 server unreachable o
 Servers on localhost and plain http are allowed here (they aren't on the website).
 
 Examples:
-  npx mcpcheck https://mcp.example.com/mcp
-  npx mcpcheck http://localhost:3000/mcp --min-grade B
-  MCP_CHECK_TOKEN=... npx mcpcheck https://mcp.example.com/mcp --markdown`
+  npx @dcodenischal/mcp-check https://mcp.example.com/mcp
+  npx @dcodenischal/mcp-check http://localhost:3000/mcp --min-grade B
+  MCP_CHECK_TOKEN=... npx @dcodenischal/mcp-check https://mcp.example.com/mcp --markdown`
 
 export function parseArgs(argv: string[], env: Record<string, string | undefined> = {}): Parsed {
   const headers: Record<string, string> = {}

@@ -1,5 +1,5 @@
 {
-  "name": "mcpcheck",
+  "name": "@dcodenischal/mcp-check",
   "version": "0.1.0",
   "description": "Grade an MCP server against the current spec, from your terminal or CI.",
   "type": "module",
@@ -31,5 +31,8 @@
     "directory": "cli"
   },
   "bugs": "https://github.com/DcodeNischal/mcp-check/issues",
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }
