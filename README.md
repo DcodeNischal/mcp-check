@@ -28,6 +28,14 @@ Every rule is traceable to the spec: see [docs/spec-notes.md](docs/spec-notes.md
   including URLs a server hands back during OAuth discovery.
 - `src/worker/`: the Cloudflare Worker API. `src/app/`: the Vue frontend.
 
+## Directory
+
+Shared reports can be listed at `/servers`. Reports made with credentials are never listed. A scheduled
+job re-checks one listed server every 10 minutes once its report is a week old; three failed re-checks in
+a row unlist it. Owners can remove their server by serving `mcp-check: remove <id>` at
+`https://<their-domain>/.well-known/mcp-check.txt` and pressing "Verify and remove" on its report page;
+it can't be listed again after that.
+
 ## Develop
 
 ```bash
@@ -45,7 +53,7 @@ npm run build
 - [x] Checker interface, explorer (run tools), raw message log
 - [x] Turnstile and abuse protection for the public API
 - [x] Shareable reports and README badges
-- [ ] Public directory with server pages and nightly re-checks
+- [x] Public directory with server pages and weekly re-checks
 - [ ] OAuth sign-in to inspect protected servers
 - [ ] `npx mcp-check` CLI and GitHub Action
 - [ ] Webhook and RSS alerts

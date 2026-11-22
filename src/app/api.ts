@@ -38,16 +38,47 @@ export interface Receipt {
 export const checkServer = (target: Target, token: string) =>
   post<{ ok: true; report: Report; log: Exchange[]; receipt?: Receipt }>('/api/check', { ...target, token })
 
-export const shareReport = (receipt: Receipt) =>
-  post<{ ok: true; id: string; reportUrl: string; badgeUrl: string }>('/api/share', { receipt })
+export const shareReport = (receipt: Receipt, list: boolean) =>
+  post<{ ok: true; id: string; reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean }>('/api/share', { receipt, list })
 
-export async function getReport(id: string): Promise<Report | null> {
+export interface StoredReport {
+  report: Report
+  listed: boolean
+  blocked: boolean
+}
+
+export async function getReport(id: string): Promise<StoredReport | null> {
   const res = await fetch(`/api/report/${encodeURIComponent(id)}`, { headers: { Accept: 'application/json' } })
   if (res.status === 404) return null
-  const data = (await res.json().catch(() => null)) as { ok?: boolean; report?: Report } | null
+  const data = (await res.json().catch(() => null)) as ({ ok?: boolean } & Partial<StoredReport>) | null
   if (!res.ok || !data?.report) throw new ApiError('This report could not be loaded.', 'server')
-  return data.report
+  return { report: data.report, listed: !!data.listed, blocked: !!data.blocked }
 }
+
+export interface DirectoryEntry {
+  id: string
+  url: string
+  name: string | null
+  grade: string
+  score: number
+  tools_count: number
+  spec_version: string | null
+  era: string | null
+  partial: number
+  auth_required: number
+  checked_at: string
+}
+
+export async function listServers(params: { q?: string; grade?: string; sort?: string; page?: number }) {
+  const qs = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, String(v))
+  const res = await fetch(`/api/servers?${qs}`, { headers: { Accept: 'application/json' } })
+  const data = (await res.json().catch(() => null)) as { servers?: DirectoryEntry[]; total?: number; pageSize?: number } | null
+  if (!res.ok || !data?.servers) throw new ApiError('The directory could not be loaded.', 'server')
+  return { servers: data.servers, total: data.total ?? 0, pageSize: data.pageSize ?? 30 }
+}
+
+export const unlistServer = (id: string) => post<{ ok: true; message: string }>('/api/unlist', { id })
 
 export const callTool = (target: Target, tool: string, args: Record<string, unknown>, token: string) =>
   post<CallOutcome>('/api/call', { ...target, tool, arguments: args, token })

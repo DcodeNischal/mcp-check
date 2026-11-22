@@ -8,6 +8,7 @@ const router = createRouter({
   routes: [
     { path: '/', component: () => import('./pages/Home.vue') },
     { path: '/r/:id', component: () => import('./pages/SharedReport.vue') },
+    { path: '/servers', component: () => import('./pages/Directory.vue') },
     { path: '/:rest(.*)*', component: () => import('./pages/Home.vue') },
   ],
   scrollBehavior: () => ({ top: 0 }),

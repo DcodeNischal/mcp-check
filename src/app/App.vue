@@ -9,6 +9,8 @@
           MCP Check
         </RouterLink>
         <nav aria-label="Main" class="flex items-center gap-5 text-sm text-silver">
+          <RouterLink to="/" class="hover:text-white" active-class="" exact-active-class="text-white">Check</RouterLink>
+          <RouterLink to="/servers" class="hover:text-white" active-class="text-white">Directory</RouterLink>
           <a href="https://github.com/DcodeNischal/mcp-check" target="_blank" rel="noopener" class="hover:text-white">GitHub</a>
         </nav>
       </div>

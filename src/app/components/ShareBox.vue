@@ -8,13 +8,22 @@
           <template v-if="report.authenticated"><br /><span class="text-amber-300">This check used your credentials, so sharing makes its tool list public.</span></template>
         </p>
       </div>
-      <button type="button" :disabled="busy" class="shrink-0 rounded-lg bg-white px-4 py-2 text-sm text-black disabled:opacity-60 cursor-pointer" @click="share">
-        {{ busy ? 'Sharing…' : 'Share report' }}
-      </button>
+      <div class="flex shrink-0 flex-col items-start gap-2 sm:items-end">
+        <button type="button" :disabled="busy" class="rounded-lg bg-white px-4 py-2 text-sm text-black disabled:opacity-60 cursor-pointer" @click="share">
+          {{ busy ? 'Sharing…' : 'Share report' }}
+        </button>
+        <label v-if="!report.authenticated" class="flex items-center gap-2 text-xs text-silver">
+          <input v-model="list" type="checkbox" /> List in the public directory
+        </label>
+      </div>
     </div>
 
     <div v-else class="space-y-4">
-      <p class="text-sm text-emerald-300">Shared. Anyone with the link can see this report.</p>
+      <p class="text-sm text-emerald-300">
+        Shared. Anyone with the link can see this report.
+        <template v-if="shared.listed"> It's <RouterLink to="/servers" class="underline underline-offset-4">listed in the directory</RouterLink>.</template>
+        <span v-else-if="shared.blocked" class="text-silver">Its owner removed it from the directory, so it isn't listed.</span>
+      </p>
       <div v-for="item in links" :key="item.label">
         <p class="text-[11px] font-mono uppercase tracking-widest text-silver">{{ item.label }}</p>
         <div class="mt-1.5 flex gap-2">
@@ -39,7 +48,8 @@ const props = defineProps<{ report: Report; receipt: Receipt }>()
 const busy = ref(false)
 const error = ref('')
 const copied = ref('')
-const shared = ref<{ reportUrl: string; badgeUrl: string } | null>(null)
+const shared = ref<{ reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean } | null>(null)
+const list = ref(true)
 
 const links = computed(() =>
   shared.value
@@ -54,8 +64,8 @@ async function share() {
   busy.value = true
   error.value = ''
   try {
-    const res = await shareReport(props.receipt)
-    shared.value = { reportUrl: res.reportUrl, badgeUrl: res.badgeUrl }
+    const res = await shareReport(props.receipt, list.value && !props.report.authenticated)
+    shared.value = { reportUrl: res.reportUrl, badgeUrl: res.badgeUrl, listed: res.listed, blocked: res.blocked }
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : 'Sharing failed. Please try again.'
   } finally {

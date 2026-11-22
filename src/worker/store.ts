@@ -32,11 +32,36 @@ export function ensureSchema(db: D1Database) {
       )`),
       db.prepare(`CREATE INDEX IF NOT EXISTS servers_listed_grade ON servers (listed, grade, score DESC)`),
     ])
+    .then(() => migrate(db))
     .catch((err) => {
       schemaReady = undefined
       throw err
     })
   return schemaReady
+}
+
+// Columns added after the first deploy. Each step runs once; "duplicate column" means another
+// request already applied it, which is fine.
+const MIGRATIONS: string[][] = [
+  [
+    `ALTER TABLE servers ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE servers ADD COLUMN failures INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE servers ADD COLUMN last_attempt_at TEXT`,
+  ],
+]
+
+async function migrate(db: D1Database) {
+  const current = Number((await db.prepare(`SELECT value FROM settings WHERE key = 'schema_version'`).first<string>('value')) ?? 0)
+  for (let v = current; v < MIGRATIONS.length; v++) {
+    for (const sql of MIGRATIONS[v]!) {
+      try {
+        await db.prepare(sql).run()
+      } catch (err) {
+        if (!/duplicate column/i.test(String((err as Error)?.message ?? err))) throw err
+      }
+    }
+    await db.prepare(`INSERT INTO settings (key, value) VALUES ('schema_version', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1`).bind(String(v + 1)).run()
+  }
 }
 
 // --- the signing key, created on first use and kept in D1 ----------------------------------
@@ -113,24 +138,107 @@ export async function serverId(url: string): Promise<string> {
 
 // --- saving and loading ---------------------------------------------------------------------
 
-export async function saveReport(db: D1Database, id: string, url: string, report: Report): Promise<void> {
+export async function saveReport(db: D1Database, id: string, url: string, report: Report, opts: { list?: boolean } = {}): Promise<{ listed: boolean; blocked: boolean }> {
   await ensureSchema(db)
   const blob = await gzip(JSON.stringify({ ...report, url }))
   const now = new Date().toISOString()
-  await db
-    .prepare(`INSERT INTO servers (id, url, name, version, grade, score, era, spec_version, tools_count, partial, auth_required, authenticated, report, checked_at, created_at, updated_at)
-              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15)
+  // Listing rules: never list a report made with someone's credentials (its tool list may be
+  // private), never re-list a server its owner removed, and keep an existing listing on re-share.
+  const row = await db
+    .prepare(`INSERT INTO servers (id, url, name, version, grade, score, era, spec_version, tools_count, partial, auth_required, authenticated, report, checked_at, created_at, updated_at, last_attempt_at, listed, failures)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15, CASE WHEN ?16 = 1 AND ?12 = 0 THEN 1 ELSE 0 END, 0)
               ON CONFLICT (id) DO UPDATE SET name = ?3, version = ?4, grade = ?5, score = ?6, era = ?7, spec_version = ?8,
-                tools_count = ?9, partial = ?10, auth_required = ?11, authenticated = ?12, report = ?13, checked_at = ?14, updated_at = ?15`)
+                tools_count = ?9, partial = ?10, auth_required = ?11, authenticated = ?12, report = ?13, checked_at = ?14, updated_at = ?15,
+                last_attempt_at = ?15, failures = 0,
+                listed = CASE WHEN servers.blocked = 1 OR ?12 = 1 THEN 0 WHEN ?16 = 1 THEN 1 ELSE servers.listed END
+              RETURNING listed, blocked`)
     .bind(
       id, url,
       report.serverInfo?.title ?? report.serverInfo?.name ?? null,
       report.serverInfo?.version ?? null,
       report.grade, report.score, report.era ?? null, report.version ?? null,
       report.tools.length, report.partial ? 1 : 0, report.auth?.required ? 1 : 0, report.authenticated ? 1 : 0,
-      blob, report.checkedAt, now,
+      blob, report.checkedAt, now, opts.list ? 1 : 0,
     )
+    .first<{ listed: number; blocked: number }>()
+  return { listed: !!row?.listed, blocked: !!row?.blocked }
+}
+
+// --- the directory --------------------------------------------------------------------------
+
+export interface DirectoryEntry {
+  id: string
+  url: string
+  name: string | null
+  grade: string
+  score: number
+  tools_count: number
+  spec_version: string | null
+  era: string | null
+  partial: number
+  auth_required: number
+  checked_at: string
+}
+
+export const PAGE_SIZE = 30
+
+export async function listServers(db: D1Database, q: { search?: string; grade?: string; sort?: 'grade' | 'recent'; page?: number }): Promise<{ servers: DirectoryEntry[]; total: number }> {
+  await ensureSchema(db)
+  const where = ['listed = 1', 'blocked = 0']
+  const binds: unknown[] = []
+  if (q.search) {
+    // Escape LIKE wildcards so a search for "%" or "_" matches literally.
+    const like = `%${q.search.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+    where.push(`(name LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')`)
+    binds.push(like, like)
+  }
+  if (q.grade) {
+    where.push('grade = ?')
+    binds.push(q.grade)
+  }
+  const order = q.sort === 'recent' ? 'checked_at DESC' : 'grade ASC, partial ASC, score DESC, name ASC'
+  const page = Math.max(1, q.page ?? 1)
+  const [rows, count] = await db.batch([
+    db.prepare(`SELECT id, url, name, grade, score, tools_count, spec_version, era, partial, auth_required, checked_at FROM servers WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`).bind(...binds),
+    db.prepare(`SELECT COUNT(*) AS n FROM servers WHERE ${where.join(' AND ')}`).bind(...binds),
+  ])
+  return { servers: (rows?.results ?? []) as DirectoryEntry[], total: Number((count?.results?.[0] as { n?: number } | undefined)?.n ?? 0) }
+}
+
+/** Every listed server, for the sitemap. */
+export async function listedIds(db: D1Database): Promise<{ id: string; checked_at: string }[]> {
+  await ensureSchema(db)
+  const { results } = await db.prepare(`SELECT id, checked_at FROM servers WHERE listed = 1 AND blocked = 0 ORDER BY checked_at DESC LIMIT 45000`).all<{ id: string; checked_at: string }>()
+  return results
+}
+
+/** Listed servers whose report is older than `olderThan`, least recently tried first. */
+export async function dueForRecheck(db: D1Database, olderThan: string, retryAfter: string, limit: number): Promise<{ id: string; url: string }[]> {
+  await ensureSchema(db)
+  const { results } = await db
+    .prepare(`SELECT id, url FROM servers WHERE listed = 1 AND blocked = 0 AND authenticated = 0 AND checked_at < ?1
+              AND (last_attempt_at IS NULL OR last_attempt_at < ?2) ORDER BY COALESCE(last_attempt_at, checked_at) ASC LIMIT ?3`)
+    .bind(olderThan, retryAfter, limit)
+    .all<{ id: string; url: string }>()
+  return results
+}
+
+/** A re-check couldn't reach the server. Three in a row removes it from the directory. */
+export async function recordFailure(db: D1Database, id: string): Promise<void> {
+  await db
+    .prepare(`UPDATE servers SET failures = failures + 1, last_attempt_at = ?2, listed = CASE WHEN failures + 1 >= 3 THEN 0 ELSE listed END WHERE id = ?1`)
+    .bind(id, new Date().toISOString())
     .run()
+}
+
+/** The owner asked for removal: unlist, and never allow re-listing. */
+export async function blockServer(db: D1Database, id: string): Promise<void> {
+  await db.prepare(`UPDATE servers SET listed = 0, blocked = 1, updated_at = ?2 WHERE id = ?1`).bind(id, new Date().toISOString()).run()
+}
+
+export async function serverUrl(db: D1Database, id: string): Promise<string | undefined> {
+  await ensureSchema(db)
+  return (await db.prepare(`SELECT url FROM servers WHERE id = ?`).bind(id).first<string>('url')) ?? undefined
 }
 
 export interface StoredServer {
@@ -142,11 +250,13 @@ export interface StoredServer {
   partial: number
   checked_at: string
   last_viewed_at: string | null
+  listed: number
+  blocked: number
 }
 
 export async function loadReport(db: D1Database, id: string): Promise<{ meta: StoredServer; report: Report } | undefined> {
   await ensureSchema(db)
-  const row = await db.prepare(`SELECT id, url, name, grade, score, partial, checked_at, last_viewed_at, report FROM servers WHERE id = ?`).bind(id).first<StoredServer & { report: ArrayBuffer | number[] }>()
+  const row = await db.prepare(`SELECT id, url, name, grade, score, partial, checked_at, last_viewed_at, listed, blocked, report FROM servers WHERE id = ?`).bind(id).first<StoredServer & { report: ArrayBuffer | number[] }>()
   if (!row) return undefined
   const bytes = row.report instanceof ArrayBuffer ? new Uint8Array(row.report) : Uint8Array.from(row.report)
   const report = JSON.parse(await gunzip(bytes)) as Report
