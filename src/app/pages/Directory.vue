@@ -4,14 +4,16 @@
       <p class="font-mono text-[11px] uppercase tracking-[0.3em] text-emerald-300">Directory</p>
       <h1 id="dir-title" class="mt-4 text-4xl font-light tracking-tight md:text-5xl">Public MCP servers, graded.</h1>
       <p class="mt-4 text-base leading-relaxed text-silver">
-        Every server here was checked by MCP Check and is re-checked every week.
+        Every server here was checked by MCP Check and is re-checked every week. Public servers from the
+        <a href="https://registry.modelcontextprotocol.io" target="_blank" rel="noopener" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">official MCP Registry</a>
+        are added automatically.
         Want yours listed? <RouterLink to="/" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">Check it</RouterLink>, then share it to the directory.
       </p>
     </section>
 
     <form class="mt-10 flex flex-col gap-3 md:flex-row md:items-center" role="search" @submit.prevent>
       <label for="dir-search" class="sr-only">Search servers</label>
-      <input id="dir-search" v-model="q" type="search" placeholder="Search by name or URL" spellcheck="false"
+      <input id="dir-search" v-model="q" type="search" placeholder="Search by name, URL or description" spellcheck="false"
              class="min-w-0 flex-1 rounded-xl border border-white/15 bg-white/[0.03] px-4 py-3 text-sm placeholder:text-silver/60 focus:border-white/40 focus:outline-none" />
       <div class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by grade">
         <button v-for="g in ['', 'A', 'B', 'C', 'D', 'F']" :key="g || 'all'" type="button" :aria-pressed="grade === g"
@@ -47,6 +49,7 @@
           <span class="min-w-0 flex-1">
             <span class="block truncate text-sm text-white">{{ s.name || hostOf(s.url) }}</span>
             <span class="block truncate font-mono text-xs text-silver">{{ s.url }}</span>
+            <span v-if="s.description" class="mt-1 block truncate text-xs text-silver/80">{{ s.description }}</span>
           </span>
           <span class="hidden shrink-0 text-right text-xs text-silver sm:block">
             <span class="block">{{ s.auth_required ? 'Sign-in required' : `${s.tools_count} tool${s.tools_count === 1 ? '' : 's'}` }}</span>

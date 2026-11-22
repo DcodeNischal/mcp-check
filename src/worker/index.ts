@@ -4,6 +4,7 @@ import { runTool } from '../checks/call'
 import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
+import { finishAttempt, nextCandidate, registryStats, startAttempt, syncDue, syncStep } from './registry'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
 import { checkTarget } from '../security/target'
 import { verifyTurnstile, type TurnstileEnv } from './turnstile'
@@ -105,7 +106,9 @@ app.get('/api/report/:id', async (c) => {
   const found = await loadReport(c.env.DB, id)
   if (!found) return c.json({ ok: false, error: 'not-found', message: 'No report with this id.' }, 404)
   c.executionCtx.waitUntil(touch(c.env.DB, found.meta).catch(() => {}))
-  return c.json({ ok: true, id, report: found.report, listed: !!found.meta.listed, blocked: !!found.meta.blocked }, 200, { 'Cache-Control': 'public, max-age=60' })
+  const m = found.meta
+  const registry = m.registry_name ? { name: m.registry_name, description: m.description, repositoryUrl: m.repository_url, websiteUrl: m.website_url } : undefined
+  return c.json({ ok: true, id, report: found.report, listed: !!m.listed, blocked: !!m.blocked, registry }, 200, { 'Cache-Control': 'public, max-age=60' })
 })
 
 // The public directory: listed servers, searchable and filterable.
@@ -144,6 +147,15 @@ app.post('/api/unlist', async (c) => {
   }
   await blockServer(c.env.DB, id)
   return c.json({ ok: true, message: 'Removed from the directory. It will not be listed again.' })
+})
+
+// Progress of the registry import and the directory size.
+app.get('/api/stats', async (c) => {
+  const [registry, listed] = await Promise.all([
+    registryStats(c.env.DB),
+    c.env.DB.prepare(`SELECT COUNT(*) AS n FROM servers WHERE listed = 1 AND blocked = 0`).first<number>('n'),
+  ])
+  return c.json({ ok: true, listed: listed ?? 0, registry }, 200, { 'Cache-Control': 'public, max-age=60' })
 })
 
 app.all('/api/*', (c) => c.json({ ok: false, error: 'not-found' }, 404))
@@ -223,8 +235,35 @@ async function withMeta(env: Env, requestUrl: string, m: { title: string; descri
   return new Response(rewritten.body, { status: 200, headers })
 }
 
-// Re-check listed servers whose report is over a week old: one per run (every 10 minutes),
-// which keeps each run well inside the free plan's limits. Three failures in a row unlist a server.
+// Every minute, exactly one small job, so each run stays inside the free plan's limits:
+// 1. while a registry sync is due or in progress, read one page of the registry;
+// 2. otherwise check one server from the registry queue and list it if it responds;
+// 3. otherwise re-check one listed server whose report is over a week old.
+async function tick(env: Env) {
+  if (await syncDue(env.DB)) {
+    const step = await syncStep(env.DB)
+    console.log('registry sync', step)
+    return
+  }
+  const candidate = await nextCandidate(env.DB)
+  if (candidate) {
+    await startAttempt(env.DB, candidate)
+    const report = await runCheck(candidate.url, { vantage: VANTAGE })
+    const ok = report.connected || !!report.auth
+    if (ok) {
+      await saveReport(env.DB, candidate.id, candidate.url, report, {
+        list: true,
+        registry: { registryName: candidate.registryName, description: candidate.description, repositoryUrl: candidate.repositoryUrl, websiteUrl: candidate.websiteUrl },
+      })
+    }
+    await finishAttempt(env.DB, candidate, ok)
+    console.log('registry check', candidate.url, ok ? report.grade : 'unreachable')
+    return
+  }
+  await recheck(env)
+}
+
+// Re-check one listed server whose report is over a week old. Three failures in a row unlist it.
 async function recheck(env: Env) {
   const now = Date.now()
   const due = await dueForRecheck(env.DB, new Date(now - 7 * 86_400_000).toISOString(), new Date(now - 86_400_000).toISOString(), 1)
@@ -255,6 +294,6 @@ function trimLog(log: Exchange[]): Exchange[] {
 export default {
   fetch: app.fetch,
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(recheck(env))
+    ctx.waitUntil(tick(env).catch((err) => console.error('tick failed', String(err))))
   },
 } satisfies ExportedHandler<Env>

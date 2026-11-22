@@ -19,6 +19,9 @@ export interface PostResult {
   response?: JsonRpcResponse
 }
 
+/** Sent on every request so server owners can see who is calling and where to learn more. */
+export const USER_AGENT = 'MCP-Check/0.1 (+https://mcp.nischaldhakal.com.np)'
+
 const DEFAULT_TIMEOUT = 15_000
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024
 const RAW_TEXT_LIMIT = 4_000
@@ -36,7 +39,7 @@ export class Wire {
     this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init))
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT
     this.maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
-    this.baseHeaders = opts.headers ?? {}
+    this.baseHeaders = { 'User-Agent': USER_AGENT, ...(opts.headers ?? {}) }
   }
 
   /** POST one JSON-RPC message. For requests, reads until the response with the same id arrives. */
@@ -106,7 +109,7 @@ export class Wire {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), this.timeoutMs)
     try {
-      const res = await untilAborted(this.fetchImpl(url, { headers: { Accept: 'application/json' }, signal: controller.signal, redirect: 'manual' }), controller.signal)
+      const res = await untilAborted(this.fetchImpl(url, { headers: { Accept: 'application/json', 'User-Agent': USER_AGENT }, signal: controller.signal, redirect: 'manual' }), controller.signal)
       const text = await untilAborted(readText(res, 256 * 1024), controller.signal)
       try {
         const json = JSON.parse(text)

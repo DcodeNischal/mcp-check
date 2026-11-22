@@ -41,10 +41,18 @@ export const checkServer = (target: Target, token: string) =>
 export const shareReport = (receipt: Receipt, list: boolean) =>
   post<{ ok: true; id: string; reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean }>('/api/share', { receipt, list })
 
+export interface RegistryInfo {
+  name: string
+  description: string | null
+  repositoryUrl: string | null
+  websiteUrl: string | null
+}
+
 export interface StoredReport {
   report: Report
   listed: boolean
   blocked: boolean
+  registry?: RegistryInfo
 }
 
 export async function getReport(id: string): Promise<StoredReport | null> {
@@ -52,7 +60,7 @@ export async function getReport(id: string): Promise<StoredReport | null> {
   if (res.status === 404) return null
   const data = (await res.json().catch(() => null)) as ({ ok?: boolean } & Partial<StoredReport>) | null
   if (!res.ok || !data?.report) throw new ApiError('This report could not be loaded.', 'server')
-  return { report: data.report, listed: !!data.listed, blocked: !!data.blocked }
+  return { report: data.report, listed: !!data.listed, blocked: !!data.blocked, ...(data.registry ? { registry: data.registry } : {}) }
 }
 
 export interface DirectoryEntry {
@@ -67,6 +75,7 @@ export interface DirectoryEntry {
   partial: number
   auth_required: number
   checked_at: string
+  description: string | null
 }
 
 export async function listServers(params: { q?: string; grade?: string; sort?: string; page?: number }) {

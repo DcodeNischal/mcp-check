@@ -48,6 +48,31 @@ const MIGRATIONS: string[][] = [
     `ALTER TABLE servers ADD COLUMN failures INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE servers ADD COLUMN last_attempt_at TEXT`,
   ],
+  [
+    // Details from the official MCP Registry, shown on server pages.
+    `ALTER TABLE servers ADD COLUMN registry_name TEXT`,
+    `ALTER TABLE servers ADD COLUMN description TEXT`,
+    `ALTER TABLE servers ADD COLUMN repository_url TEXT`,
+    `ALTER TABLE servers ADD COLUMN website_url TEXT`,
+    // Servers found in the registry, waiting to be checked.
+    `CREATE TABLE IF NOT EXISTS registry (
+      url TEXT PRIMARY KEY,
+      id TEXT NOT NULL,
+      host TEXT NOT NULL,
+      registry_name TEXT NOT NULL,
+      title TEXT,
+      description TEXT,
+      version TEXT,
+      repository_url TEXT,
+      website_url TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_attempt_at TEXT,
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS registry_pending ON registry (status, last_attempt_at)`,
+  ],
 ]
 
 async function migrate(db: D1Database) {
@@ -138,7 +163,14 @@ export async function serverId(url: string): Promise<string> {
 
 // --- saving and loading ---------------------------------------------------------------------
 
-export async function saveReport(db: D1Database, id: string, url: string, report: Report, opts: { list?: boolean } = {}): Promise<{ listed: boolean; blocked: boolean }> {
+export interface RegistryDetails {
+  registryName: string
+  description: string | null
+  repositoryUrl: string | null
+  websiteUrl: string | null
+}
+
+export async function saveReport(db: D1Database, id: string, url: string, report: Report, opts: { list?: boolean; registry?: RegistryDetails } = {}): Promise<{ listed: boolean; blocked: boolean }> {
   await ensureSchema(db)
   const blob = await gzip(JSON.stringify({ ...report, url }))
   const now = new Date().toISOString()
@@ -161,6 +193,12 @@ export async function saveReport(db: D1Database, id: string, url: string, report
       blob, report.checkedAt, now, opts.list ? 1 : 0,
     )
     .first<{ listed: number; blocked: number }>()
+  if (opts.registry) {
+    await db
+      .prepare(`UPDATE servers SET registry_name = ?2, description = ?3, repository_url = ?4, website_url = ?5 WHERE id = ?1`)
+      .bind(id, opts.registry.registryName, opts.registry.description, opts.registry.repositoryUrl, opts.registry.websiteUrl)
+      .run()
+  }
   return { listed: !!row?.listed, blocked: !!row?.blocked }
 }
 
@@ -178,6 +216,7 @@ export interface DirectoryEntry {
   partial: number
   auth_required: number
   checked_at: string
+  description: string | null
 }
 
 export const PAGE_SIZE = 30
@@ -189,8 +228,8 @@ export async function listServers(db: D1Database, q: { search?: string; grade?: 
   if (q.search) {
     // Escape LIKE wildcards so a search for "%" or "_" matches literally.
     const like = `%${q.search.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
-    where.push(`(name LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\')`)
-    binds.push(like, like)
+    where.push(`(name LIKE ? ESCAPE '\\' OR url LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')`)
+    binds.push(like, like, like)
   }
   if (q.grade) {
     where.push('grade = ?')
@@ -199,7 +238,7 @@ export async function listServers(db: D1Database, q: { search?: string; grade?: 
   const order = q.sort === 'recent' ? 'checked_at DESC' : 'grade ASC, partial ASC, score DESC, name ASC'
   const page = Math.max(1, q.page ?? 1)
   const [rows, count] = await db.batch([
-    db.prepare(`SELECT id, url, name, grade, score, tools_count, spec_version, era, partial, auth_required, checked_at FROM servers WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`).bind(...binds),
+    db.prepare(`SELECT id, url, name, grade, score, tools_count, spec_version, era, partial, auth_required, checked_at, description FROM servers WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`).bind(...binds),
     db.prepare(`SELECT COUNT(*) AS n FROM servers WHERE ${where.join(' AND ')}`).bind(...binds),
   ])
   return { servers: (rows?.results ?? []) as DirectoryEntry[], total: Number((count?.results?.[0] as { n?: number } | undefined)?.n ?? 0) }
@@ -252,11 +291,15 @@ export interface StoredServer {
   last_viewed_at: string | null
   listed: number
   blocked: number
+  registry_name: string | null
+  description: string | null
+  repository_url: string | null
+  website_url: string | null
 }
 
 export async function loadReport(db: D1Database, id: string): Promise<{ meta: StoredServer; report: Report } | undefined> {
   await ensureSchema(db)
-  const row = await db.prepare(`SELECT id, url, name, grade, score, partial, checked_at, last_viewed_at, listed, blocked, report FROM servers WHERE id = ?`).bind(id).first<StoredServer & { report: ArrayBuffer | number[] }>()
+  const row = await db.prepare(`SELECT id, url, name, grade, score, partial, checked_at, last_viewed_at, listed, blocked, registry_name, description, repository_url, website_url, report FROM servers WHERE id = ?`).bind(id).first<StoredServer & { report: ArrayBuffer | number[] }>()
   if (!row) return undefined
   const bytes = row.report instanceof ArrayBuffer ? new Uint8Array(row.report) : Uint8Array.from(row.report)
   const report = JSON.parse(await gunzip(bytes)) as Report

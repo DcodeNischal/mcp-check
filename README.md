@@ -36,6 +36,16 @@ a row unlist it. Owners can remove their server by serving `mcp-check: remove <i
 `https://<their-domain>/.well-known/mcp-check.txt` and pressing "Verify and remove" on its report page;
 it can't be listed again after that.
 
+## Registry import
+
+A cron trigger runs once a minute and does one small job per run: while a daily sync is due it reads one
+page of the [official MCP Registry](https://registry.modelcontextprotocol.io); otherwise it checks one
+queued server (never the same host twice in a row) and lists it if it responds; otherwise it re-checks
+one listed server whose report is a week old. Servers that need a per-user key (required headers, URL
+placeholders, query strings) or have no public URL are skipped, and a server is dropped after three
+failed attempts. Every request sends `User-Agent: MCP-Check/0.1 (+https://mcp.nischaldhakal.com.np)`.
+Progress: `GET /api/stats`.
+
 ## Develop
 
 ```bash

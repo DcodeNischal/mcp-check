@@ -18,7 +18,7 @@
   ],
   // Turnstile tokens must come from this hostname. The secret is a Worker secret (TURNSTILE_SECRET).
   "vars": { "TURNSTILE_HOSTNAMES": "mcp.nischaldhakal.com.np" },
-  // Re-check one listed server every 10 minutes (see recheck in src/worker/index.ts).
-  "triggers": { "crons": ["*/10 * * * *"] },
+  // One small job a minute: registry sync, checking new servers, or weekly re-checks (see tick in src/worker/index.ts).
+  "triggers": { "crons": ["* * * * *"] },
   "observability": { "enabled": true }
 }

@@ -11,7 +11,15 @@
     <p v-else-if="state === 'error'" role="alert" class="text-sm text-rose-300">This report could not be loaded. Please try again.</p>
 
     <template v-else-if="report">
-      <p class="font-mono text-[11px] uppercase tracking-[0.3em] text-silver">Shared report · checked {{ checkedAgo }}</p>
+      <p class="font-mono text-[11px] uppercase tracking-[0.3em] text-silver">{{ registry ? 'Directory' : 'Shared report' }} · checked {{ checkedAgo }}</p>
+      <div v-if="registry" class="mt-4 max-w-3xl">
+        <p v-if="registry.description" class="text-base leading-relaxed text-silver">{{ registry.description }}</p>
+        <p class="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-silver">
+          <a v-if="registry.repositoryUrl" :href="registry.repositoryUrl" target="_blank" rel="nofollow ugc noopener noreferrer" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">Source code</a>
+          <a v-if="registry.websiteUrl" :href="registry.websiteUrl" target="_blank" rel="nofollow ugc noopener noreferrer" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">Website</a>
+          <span>In the <a href="https://registry.modelcontextprotocol.io" target="_blank" rel="noopener" class="underline decoration-white/30 underline-offset-4 hover:text-white">MCP Registry</a> as <code class="font-mono text-white/80">{{ registry.name }}</code></span>
+        </p>
+      </div>
       <ReportView :report="report" :target="{ url: report.url, headers: {} }">
         <template #actions>
           <div class="flex flex-wrap items-center gap-3">
@@ -39,13 +47,14 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ApiError, getReport, unlistServer, type Report } from '../api'
+import { ApiError, getReport, unlistServer, type RegistryInfo, type Report } from '../api'
 import ReportView from '../components/ReportView.vue'
 
 const route = useRoute()
 const state = ref<'loading' | 'ready' | 'missing' | 'error'>('loading')
 const report = ref<Report | null>(null)
 const listed = ref(false)
+const registry = ref<RegistryInfo>()
 const id = String(route.params.id)
 const removing = ref(false)
 const removed = ref(false)
@@ -85,6 +94,7 @@ onMounted(async () => {
     const found = await getReport(id)
     report.value = found?.report ?? null
     listed.value = !!found?.listed
+    registry.value = found?.registry
     state.value = report.value ? 'ready' : 'missing'
   } catch {
     state.value = 'error'

@@ -1,0 +1,167 @@
+// Sync from the official MCP Registry (registry.modelcontextprotocol.io) into a queue of servers
+// to check. Only the latest, active version of each server with a public remote URL is kept, and
+// servers that need a per-user key (required headers, URL placeholders, query strings) are skipped,
+// since they can't be graded fairly without credentials.
+import { USER_AGENT } from '../mcp/wire'
+import { checkTarget } from '../security/target'
+import { canonicalUrl, ensureSchema, serverId } from './store'
+
+export const REGISTRY_API = 'https://registry.modelcontextprotocol.io/v0/servers'
+const PAGE_SIZE = 100
+const SYNC_EVERY_MS = 24 * 60 * 60 * 1000
+
+export interface Candidate {
+  url: string
+  host: string
+  registryName: string
+  title: string | null
+  description: string | null
+  version: string | null
+  repositoryUrl: string | null
+  websiteUrl: string | null
+}
+
+type Json = Record<string, unknown>
+const str = (v: unknown, max = 500): string | null => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : null)
+const httpsUrl = (v: unknown): string | null => {
+  const s = str(v, 300)
+  if (!s) return null
+  try {
+    return new URL(s).protocol === 'https:' ? s : null
+  } catch {
+    return null
+  }
+}
+
+/** Turn one registry page into check candidates. Pure, so it can be tested. */
+export function parseRegistryPage(page: unknown): { candidates: Candidate[]; nextCursor?: string } {
+  const data = (page ?? {}) as { servers?: unknown; metadata?: Json }
+  const candidates: Candidate[] = []
+  for (const item of Array.isArray(data.servers) ? (data.servers as Json[]) : []) {
+    const meta = ((item._meta as Json | undefined)?.['io.modelcontextprotocol.registry/official'] ?? {}) as Json
+    if (meta.isLatest !== true) continue
+    if (meta.status !== undefined && meta.status !== 'active') continue
+    const server = (item.server ?? {}) as Json
+    const remotes = Array.isArray(server.remotes) ? (server.remotes as Json[]) : []
+    for (const remote of remotes) {
+      if (remote.type !== 'streamable-http' && remote.type !== 'sse') continue
+      // Required headers mean a per-user API key we don't have.
+      if (Array.isArray(remote.headers) && (remote.headers as Json[]).some((h) => h?.isRequired === true)) continue
+      const raw = typeof remote.url === 'string' ? remote.url : ''
+      if (!raw || /[{}]/.test(raw) || raw.includes('?') || raw.includes('#')) continue
+      if (!checkTarget(raw).ok) continue
+      const canonical = canonicalUrl(raw)
+      if (!canonical.ok) continue
+      const repo = server.repository as Json | undefined
+      candidates.push({
+        url: canonical.url,
+        host: new URL(canonical.url).hostname,
+        registryName: String(server.name ?? '').slice(0, 200),
+        title: str(server.title, 120),
+        description: str(server.description, 400),
+        version: str(server.version, 50),
+        repositoryUrl: httpsUrl(repo?.url),
+        websiteUrl: httpsUrl(server.websiteUrl),
+      })
+      break // one URL per server
+    }
+  }
+  const next = typeof data.metadata?.nextCursor === 'string' && data.metadata.nextCursor ? data.metadata.nextCursor : undefined
+  return { candidates, ...(next ? { nextCursor: next } : {}) }
+}
+
+async function setting(db: D1Database, key: string): Promise<string | null> {
+  return db.prepare(`SELECT value FROM settings WHERE key = ?`).bind(key).first<string>('value')
+}
+function putSetting(db: D1Database, key: string, value: string | null) {
+  return value === null
+    ? db.prepare(`DELETE FROM settings WHERE key = ?`).bind(key)
+    : db.prepare(`INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT (key) DO UPDATE SET value = ?2`).bind(key, value)
+}
+
+/** Is a registry sync in progress or due? */
+export async function syncDue(db: D1Database, now = Date.now()): Promise<boolean> {
+  await ensureSchema(db)
+  if (await setting(db, 'registry_cursor')) return true
+  const last = await setting(db, 'registry_synced_at')
+  return !last || now - Date.parse(last) > SYNC_EVERY_MS
+}
+
+/** Read one page of the registry and queue its servers. Returns false when the sync is complete. */
+export async function syncStep(db: D1Database, fetchImpl: typeof fetch = fetch): Promise<{ added: number; done: boolean }> {
+  await ensureSchema(db)
+  const cursor = await setting(db, 'registry_cursor')
+  const qs = new URLSearchParams({ limit: String(PAGE_SIZE), ...(cursor ? { cursor } : {}) })
+  const res = await fetchImpl(`${REGISTRY_API}?${qs}`, { headers: { Accept: 'application/json', 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(20_000) })
+  if (!res.ok) throw new Error(`registry HTTP ${res.status}`)
+  const { candidates, nextCursor } = parseRegistryPage(await res.json())
+
+  const now = new Date().toISOString()
+  const statements: D1PreparedStatement[] = []
+  for (const c of candidates) {
+    const id = await serverId(c.url)
+    statements.push(
+      db.prepare(`INSERT INTO registry (url, id, host, registry_name, title, description, version, repository_url, website_url, first_seen_at, last_seen_at)
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+                  ON CONFLICT (url) DO UPDATE SET registry_name = ?4, title = ?5, description = ?6, version = ?7, repository_url = ?8, website_url = ?9, last_seen_at = ?10`)
+        .bind(c.url, id, c.host, c.registryName, c.title, c.description, c.version, c.repositoryUrl, c.websiteUrl, now),
+      // Keep the details on already-listed servers current too.
+      db.prepare(`UPDATE servers SET registry_name = ?2, description = ?3, repository_url = ?4, website_url = ?5 WHERE id = ?1`)
+        .bind(id, c.registryName, c.description, c.repositoryUrl, c.websiteUrl),
+    )
+  }
+  statements.push(putSetting(db, 'registry_cursor', nextCursor ?? null))
+  if (!nextCursor) statements.push(putSetting(db, 'registry_synced_at', now))
+  await db.batch(statements)
+  return { added: candidates.length, done: !nextCursor }
+}
+
+export interface QueuedServer extends Candidate {
+  id: string
+  attempts: number
+}
+
+/**
+ * The next registry server to check: never checked, or a failed attempt over an hour ago, and not
+ * on the same host as the last check (so no one domain gets a burst of checks).
+ */
+export async function nextCandidate(db: D1Database): Promise<QueuedServer | undefined> {
+  await ensureSchema(db)
+  const lastHost = (await setting(db, 'last_check_host')) ?? ''
+  const retryBefore = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+  // Prefer a different host; fall back to any host if that's all that's left.
+  const row = (await pick(db, retryBefore, lastHost)) ?? (lastHost ? await pick(db, retryBefore, '') : undefined)
+  if (!row) return undefined
+  return { url: row.url, id: row.id, host: row.host, registryName: row.registry_name, title: row.title, description: row.description, version: row.version, repositoryUrl: row.repository_url, websiteUrl: row.website_url, attempts: row.attempts }
+}
+
+async function pick(db: D1Database, retryBefore: string, excludeHost: string) {
+  return (await db
+    .prepare(`SELECT r.url, r.id, r.host, r.registry_name, r.title, r.description, r.version, r.repository_url, r.website_url, r.attempts
+              FROM registry r LEFT JOIN servers s ON s.id = r.id
+              WHERE r.status = 'pending' AND (r.last_attempt_at IS NULL OR r.last_attempt_at < ?1) AND r.host != ?2
+                AND (s.id IS NULL OR s.blocked = 0)
+              ORDER BY r.attempts ASC, r.first_seen_at ASC LIMIT 1`)
+    .bind(retryBefore, excludeHost)
+    .first<{ url: string; id: string; host: string; registry_name: string; title: string | null; description: string | null; version: string | null; repository_url: string | null; website_url: string | null; attempts: number }>()) ?? undefined
+}
+
+/** Mark the attempt before checking, so a run that gets cut off doesn't block the queue. */
+export async function startAttempt(db: D1Database, c: QueuedServer): Promise<void> {
+  await db.batch([
+    db.prepare(`UPDATE registry SET attempts = attempts + 1, last_attempt_at = ?2 WHERE url = ?1`).bind(c.url, new Date().toISOString()),
+    putSetting(db, 'last_check_host', c.host),
+  ])
+}
+
+/** Checked and listed, or given up after three failed attempts. */
+export async function finishAttempt(db: D1Database, c: QueuedServer, ok: boolean): Promise<void> {
+  const status = ok ? 'checked' : c.attempts + 1 >= 3 ? 'skipped' : 'pending'
+  await db.prepare(`UPDATE registry SET status = ?2 WHERE url = ?1`).bind(c.url, status).run()
+}
+
+export async function registryStats(db: D1Database): Promise<Record<string, number>> {
+  await ensureSchema(db)
+  const { results } = await db.prepare(`SELECT status, COUNT(*) AS n FROM registry GROUP BY status`).all<{ status: string; n: number }>()
+  return Object.fromEntries(results.map((r) => [r.status, r.n]))
+}
