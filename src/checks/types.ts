@@ -67,5 +67,9 @@ export interface Report {
   partial?: boolean
   score: number
   grade: Grade
+  /** The failed check that held an A down to a B, if one did. */
+  gradeCap?: string
+  /** Which version of the grading rules produced this grade (missing means 1). */
+  gradingVersion?: number
   error?: string
 }

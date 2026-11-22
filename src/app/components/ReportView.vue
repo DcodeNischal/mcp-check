@@ -13,6 +13,7 @@
           <p class="mt-2 text-sm text-silver">
             <span class="sr-only">Grade {{ report.grade }}, </span>Score {{ report.score }}/100
             <template v-if="report.partial"> · <span class="text-amber-300">Partial grade: sign in to grade its tools</span></template>
+            <template v-if="report.gradeCap"> · <span class="text-amber-300">Held at B: fails “{{ report.gradeCap }}”</span></template>
           </p>
         </div>
       </div>

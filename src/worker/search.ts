@@ -4,7 +4,8 @@
 // out of free quota, search falls back to keywords alone.
 import type { Report } from '../checks/types'
 import { issuesOf } from './stats'
-import { ensureSchema, gunzip, type DirectoryEntry } from './store'
+import { GRADING_VERSION, regrade } from '../checks/grade'
+import { ensureSchema, gunzip, gzip, type DirectoryEntry } from './store'
 
 export interface SearchEnv {
   DB: D1Database
@@ -169,22 +170,26 @@ export async function searchServers(env: SearchEnv, q: SearchQuery): Promise<Sea
 // --- keeping the indexes current (from the cron tick) ----------------------------------------
 
 /**
- * Fill in tool text and issues for servers saved before those columns existed, a few at a time.
- * Saving tool text fires the triggers that update the keyword index and mark the server for
- * re-embedding.
+ * Bring older stored reports up to date, a few at a time: fill in tool text and issues for servers
+ * saved before those columns existed, and regrade reports graded under earlier rules. Saving tool
+ * text fires the triggers that update the keyword index and mark the server for re-embedding.
  */
 export async function backfillToolsText(db: D1Database, limit = 10): Promise<number> {
   await ensureSchema(db)
   const { results } = await db
-    .prepare(`SELECT id, report FROM servers WHERE (tools_text IS NULL OR issues IS NULL) AND listed = 1 AND blocked = 0 LIMIT ?1`)
-    .bind(limit)
+    .prepare(`SELECT id, report FROM servers WHERE (tools_text IS NULL OR issues IS NULL OR grading_version < ?2) AND listed = 1 AND blocked = 0 LIMIT ?1`)
+    .bind(limit, GRADING_VERSION)
     .all<{ id: string; report: ArrayBuffer | number[] }>()
   if (!results.length) return 0
   const statements: D1PreparedStatement[] = []
   for (const row of results) {
     const bytes = row.report instanceof ArrayBuffer ? new Uint8Array(row.report) : Uint8Array.from(row.report)
-    const report = JSON.parse(await gunzip(bytes)) as Report
-    statements.push(db.prepare(`UPDATE servers SET tools_text = ?2, issues = ?3 WHERE id = ?1`).bind(row.id, toolsText(report.tools ?? []), issuesOf(report)))
+    const stored = JSON.parse(await gunzip(bytes)) as Report
+    const report = regrade(stored)
+    statements.push(
+      db.prepare(`UPDATE servers SET tools_text = ?2, issues = ?3, grade = ?4, score = ?5, grading_version = ?6, report = ?7 WHERE id = ?1`)
+        .bind(row.id, toolsText(report.tools ?? []), issuesOf(report), report.grade, report.score, report.gradingVersion ?? 1, report === stored ? bytes : await gzip(JSON.stringify(report))),
+    )
   }
   await db.batch(statements)
   return results.length

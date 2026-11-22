@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { GRADING_VERSION, gradeChecks, regrade } from '../src/checks/grade'
 import { runCheck } from '../src/checks/run'
 import type { Report } from '../src/checks/types'
 import { checkTarget } from '../src/security/target'
@@ -26,8 +27,17 @@ describe('graded reports', () => {
     expect(r.era).toBe('legacy-streamable')
     expect(byId(r, 'protocol.era')?.status).toBe('warn')
     expect(byId(r, 'protocol.notifications')?.status).toBe('pass')
-    expect(byId(r, 'security.origin')?.status).toBe('warn')
+    // The spec says servers MUST validate Origin, so accepting a foreign one fails.
+    expect(byId(r, 'security.origin')?.status).toBe('fail')
+    expect(byId(r, 'security.origin')?.weight).toBe(3)
     expect(['A', 'B']).toContain(r.grade)
+    expect(r.gradingVersion).toBe(GRADING_VERSION)
+  })
+
+  it('fails servers two or more spec revisions behind', async () => {
+    const r = await runCheck(URL_, { fetch: asFetch(legacyStreamableServer({ version: '2025-06-18' })) })
+    expect(r.version).toBe('2025-06-18')
+    expect(byId(r, 'protocol.era')?.status).toBe('fail')
   })
 
   it('fails the deprecated HTTP+SSE transport on the era check', async () => {
@@ -134,5 +144,35 @@ describe('target guard', () => {
     const r = await runCheck('https://127.0.0.1/mcp', { fetch: asFetch(async () => { called = true; return new Response() }) })
     expect(called).toBe(false)
     expect(r.error).toMatch(/Private/)
+  })
+})
+
+describe('grading rules', () => {
+  const check = (id: string, status: 'pass' | 'warn' | 'fail', weight = 3, category: 'protocol' | 'security' | 'tools' = 'protocol') => ({ id, category, title: id, status, weight, detail: '' })
+
+  it('holds an A at B when a serious security check fails', () => {
+    const many = Array.from({ length: 30 }, (_, i) => check(`p${i}`, 'pass'))
+    expect(gradeChecks(many)).toEqual({ score: 100, grade: 'A' })
+    const leaky = [...many, check('security.error-leaks', 'fail', 2, 'security')]
+    expect(gradeChecks(leaky)).toEqual({ score: 98, grade: 'B', gradeCap: 'security.error-leaks' })
+    // Other failures lower the score but don't cap it.
+    expect(gradeChecks([...many, check('tools.size', 'fail', 1, 'tools')]).grade).toBe('A')
+  })
+
+  it('regrades reports made under the first rules', () => {
+    const old = {
+      url: URL_, checkedAt: '', durationMs: 0, connected: true, authenticated: false, version: '2025-06-18',
+      steps: [], tools: [], prompts: [], resources: [], resourceTemplates: [], score: 95, grade: 'A' as const,
+      checks: [
+        ...Array.from({ length: 10 }, (_, i) => check(`p${i}`, 'pass')),
+        check('protocol.era', 'warn'),
+        check('security.origin', 'warn', 1, 'security'),
+      ],
+    }
+    const r = regrade(old)
+    expect(r.checks.find((c) => c.id === 'security.origin')).toMatchObject({ status: 'fail', weight: 3 })
+    expect(r.checks.find((c) => c.id === 'protocol.era')?.status).toBe('fail')
+    expect(r).toMatchObject({ score: 83, grade: 'B', gradingVersion: GRADING_VERSION })
+    expect(regrade(r)).toBe(r)
   })
 })

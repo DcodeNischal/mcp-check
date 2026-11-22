@@ -19,6 +19,13 @@ Live at **[mcp.nischaldhakal.com.np](https://mcp.nischaldhakal.com.np)**, in you
 
 Every rule is traceable to the spec: see [docs/spec-notes.md](docs/spec-notes.md).
 
+**Grading.** Each check has a weight; a pass earns its full weight, a warning half, a failure none,
+and the total out of 100 sets the grade (A 90+, B 80+, C 70+, D 60+). Rules a spec says servers
+MUST follow are failures when missed (accepting a foreign `Origin` is one), being one revision behind
+is a warning, and two or more is a failure. Serving over plain HTTP or leaking stack traces holds the
+grade at B at best. When the rules change, stored reports are regraded in the background without
+sending grade-change alerts.
+
 ## How it works
 
 - `src/mcp/`: an MCP client built for checking. It detects the server's era, records every message

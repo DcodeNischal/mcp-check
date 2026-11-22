@@ -4,7 +4,7 @@ import { McpClient, isObject } from '../mcp/client'
 import { ERROR, LEGACY_VERSIONS, MODERN_VERSION, type Exchange } from '../mcp/types'
 import { checkTarget, type TargetPolicy } from '../security/target'
 import { discoverAuth } from './auth'
-import { grade, score } from './grade'
+import { GRADING_VERSION, gradeChecks } from './grade'
 import { toolChecks } from './tools'
 import type { CheckResult, Report, Status, ToolSummary } from './types'
 
@@ -118,8 +118,8 @@ export async function runCheck(rawUrl: string, opts: CheckOptions = {}): Promise
 }
 
 function finish(report: Report, checks: CheckResult[], started: number): Report {
-  const value = score(checks)
-  return { ...report, checks, score: value, grade: grade(value), durationMs: Date.now() - started }
+  const g = gradeChecks(checks)
+  return { ...report, checks, score: g.score, grade: g.grade, ...(g.gradeCap ? { gradeCap: g.gradeCap } : {}), gradingVersion: GRADING_VERSION, durationMs: Date.now() - started }
 }
 
 // --- protocol ------------------------------------------------------------------------------
@@ -143,8 +143,9 @@ function protocolChecks(conn: Awaited<ReturnType<McpClient['connect']>>, log: Ex
     out.push({ id: 'protocol.era', category: 'protocol', title: 'Speaks the current spec', status: 'pass', weight: 3, detail: `Speaks ${MODERN_VERSION}, the current MCP revision.` })
   } else if (era === 'legacy-streamable') {
     const latestLegacy = conn.version === LEGACY_VERSIONS[0]
+    // The previous revision is a warning; two or more behind is a failure.
     out.push({
-      id: 'protocol.era', category: 'protocol', title: 'Speaks the current spec', status: 'warn', weight: 3,
+      id: 'protocol.era', category: 'protocol', title: 'Speaks the current spec', status: latestLegacy ? 'warn' : 'fail', weight: 3,
       detail: `Speaks ${conn.version} over Streamable HTTP. ${latestLegacy ? 'That was the previous revision' : 'That is an older revision'}; current clients expect ${MODERN_VERSION} (stateless, no initialize handshake).`,
       fix: `Upgrade your MCP SDK to one that supports ${MODERN_VERSION}, keeping ${LEGACY_VERSIONS[0]} for older clients.`,
     })
@@ -218,8 +219,9 @@ async function probeChecks(client: McpClient): Promise<CheckResult[]> {
     const foreign = await client.request(method, {}, undefined, { Origin: FOREIGN_ORIGIN })
     const s = foreign.exchange.status
     out.push(s === 403
-      ? { id: 'security.origin', category: 'security', title: 'Rejects requests from other websites', status: 'pass', weight: 1, detail: 'A request with a foreign Origin header was refused with 403.' }
-      : { id: 'security.origin', category: 'security', title: 'Rejects requests from other websites', status: s !== undefined && s >= 400 ? 'pass' : 'warn', weight: 1, detail: s !== undefined && s >= 400 ? `A request with a foreign Origin header was refused (HTTP ${s}).` : 'A request with a foreign Origin header was accepted. Browsers on any website could send requests to this server.', ...(s !== undefined && s < 400 ? { fix: 'Validate the Origin header and return 403 when it isn\'t an origin you trust.' } : {}) })
+      ? { id: 'security.origin', category: 'security', title: 'Rejects requests from other websites', status: 'pass', weight: 3, detail: 'A request with a foreign Origin header was refused with 403.' }
+      // The spec says servers MUST validate Origin, so accepting a foreign one fails.
+      : { id: 'security.origin', category: 'security', title: 'Rejects requests from other websites', status: s !== undefined && s >= 400 ? 'pass' : 'fail', weight: 3, detail: s !== undefined && s >= 400 ? `A request with a foreign Origin header was refused (HTTP ${s}).` : 'A request with a foreign Origin header was accepted. Browsers on any website could send requests to this server.', ...(s !== undefined && s < 400 ? { fix: 'Validate the Origin header and return 403 when it isn\'t an origin you trust.' } : {}) })
   }
   return out
 }

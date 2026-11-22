@@ -765,6 +765,7 @@ var fail = make("fail");
 var skip = (id, title, detail) => ({ id, category: "auth", title, status: "skip", weight: 0, detail });
 
 // src/checks/grade.ts
+var GRADING_VERSION = 2;
 var POINTS = { pass: 1, warn: 0.5, fail: 0 };
 function score(checks) {
   let earned = 0;
@@ -782,6 +783,13 @@ function grade(value) {
   if (value >= 70) return "C";
   if (value >= 60) return "D";
   return "F";
+}
+var CAPPING = /* @__PURE__ */ new Set(["security.https", "security.error-leaks"]);
+function gradeChecks(checks) {
+  const value = score(checks);
+  const g = grade(value);
+  const cap = checks.find((c) => CAPPING.has(c.id) && c.status === "fail");
+  return cap && g === "A" ? { score: value, grade: "B", gradeCap: cap.title } : { score: value, grade: g };
 }
 
 // src/checks/tools.ts
@@ -1006,8 +1014,8 @@ async function runCheck(rawUrl, opts = {}) {
   }
 }
 function finish(report, checks, started) {
-  const value = score(checks);
-  return { ...report, checks, score: value, grade: grade(value), durationMs: Date.now() - started };
+  const g = gradeChecks(checks);
+  return { ...report, checks, score: g.score, grade: g.grade, ...g.gradeCap ? { gradeCap: g.gradeCap } : {}, gradingVersion: GRADING_VERSION, durationMs: Date.now() - started };
 }
 var LOOPBACK = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "[::1]"]);
 function httpsCheck(url) {
@@ -1027,7 +1035,7 @@ function protocolChecks(conn, log) {
       id: "protocol.era",
       category: "protocol",
       title: "Speaks the current spec",
-      status: "warn",
+      status: latestLegacy ? "warn" : "fail",
       weight: 3,
       detail: `Speaks ${conn.version} over Streamable HTTP. ${latestLegacy ? "That was the previous revision" : "That is an older revision"}; current clients expect ${MODERN_VERSION} (stateless, no initialize handshake).`,
       fix: `Upgrade your MCP SDK to one that supports ${MODERN_VERSION}, keeping ${LEGACY_VERSIONS[0]} for older clients.`
@@ -1084,7 +1092,7 @@ async function probeChecks(client) {
     const method = client.era === "modern" ? "server/discover" : "tools/list";
     const foreign = await client.request(method, {}, void 0, { Origin: FOREIGN_ORIGIN });
     const s = foreign.exchange.status;
-    out.push(s === 403 ? { id: "security.origin", category: "security", title: "Rejects requests from other websites", status: "pass", weight: 1, detail: "A request with a foreign Origin header was refused with 403." } : { id: "security.origin", category: "security", title: "Rejects requests from other websites", status: s !== void 0 && s >= 400 ? "pass" : "warn", weight: 1, detail: s !== void 0 && s >= 400 ? `A request with a foreign Origin header was refused (HTTP ${s}).` : "A request with a foreign Origin header was accepted. Browsers on any website could send requests to this server.", ...s !== void 0 && s < 400 ? { fix: "Validate the Origin header and return 403 when it isn't an origin you trust." } : {} });
+    out.push(s === 403 ? { id: "security.origin", category: "security", title: "Rejects requests from other websites", status: "pass", weight: 3, detail: "A request with a foreign Origin header was refused with 403." } : { id: "security.origin", category: "security", title: "Rejects requests from other websites", status: s !== void 0 && s >= 400 ? "pass" : "fail", weight: 3, detail: s !== void 0 && s >= 400 ? `A request with a foreign Origin header was refused (HTTP ${s}).` : "A request with a foreign Origin header was accepted. Browsers on any website could send requests to this server.", ...s !== void 0 && s < 400 ? { fix: "Validate the Origin header and return 403 when it isn't an origin you trust." } : {} });
   }
   return out;
 }
