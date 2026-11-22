@@ -3,6 +3,7 @@
 // Meaning search is optional: without the AI and VECTORS bindings, or if either fails or runs
 // out of free quota, search falls back to keywords alone.
 import type { Report } from '../checks/types'
+import { issuesOf } from './stats'
 import { ensureSchema, gunzip, type DirectoryEntry } from './store'
 
 export interface SearchEnv {
@@ -168,13 +169,14 @@ export async function searchServers(env: SearchEnv, q: SearchQuery): Promise<Sea
 // --- keeping the indexes current (from the cron tick) ----------------------------------------
 
 /**
- * Fill in tool text for servers saved before search existed, a few at a time. Saving it fires
- * the triggers that update the keyword index and mark the server for re-embedding.
+ * Fill in tool text and issues for servers saved before those columns existed, a few at a time.
+ * Saving tool text fires the triggers that update the keyword index and mark the server for
+ * re-embedding.
  */
 export async function backfillToolsText(db: D1Database, limit = 10): Promise<number> {
   await ensureSchema(db)
   const { results } = await db
-    .prepare(`SELECT id, report FROM servers WHERE tools_text IS NULL AND listed = 1 AND blocked = 0 LIMIT ?1`)
+    .prepare(`SELECT id, report FROM servers WHERE (tools_text IS NULL OR issues IS NULL) AND listed = 1 AND blocked = 0 LIMIT ?1`)
     .bind(limit)
     .all<{ id: string; report: ArrayBuffer | number[] }>()
   if (!results.length) return 0
@@ -182,7 +184,7 @@ export async function backfillToolsText(db: D1Database, limit = 10): Promise<num
   for (const row of results) {
     const bytes = row.report instanceof ArrayBuffer ? new Uint8Array(row.report) : Uint8Array.from(row.report)
     const report = JSON.parse(await gunzip(bytes)) as Report
-    statements.push(db.prepare(`UPDATE servers SET tools_text = ?2 WHERE id = ?1`).bind(row.id, toolsText(report.tools ?? [])))
+    statements.push(db.prepare(`UPDATE servers SET tools_text = ?2, issues = ?3 WHERE id = ?1`).bind(row.id, toolsText(report.tools ?? []), issuesOf(report)))
   }
   await db.batch(statements)
   return results.length

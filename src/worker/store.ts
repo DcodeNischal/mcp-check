@@ -3,6 +3,7 @@
 // upload a made-up grade.
 import type { Report } from '../checks/types'
 import { toolsText } from './search'
+import { issuesOf } from './stats'
 
 const MAX_RECEIPT_AGE_MS = 60 * 60 * 1000
 
@@ -180,6 +181,10 @@ const MIGRATIONS: string[][] = [
       INSERT INTO deliveries (webhook_id, event_seq, attempts, next_at) SELECT id, new.seq, 0, new.at FROM webhooks WHERE server_id = new.server_id AND active = 1;
     END`,
   ],
+  [
+    // Each server's warnings and failures as JSON, for directory-wide stats (see stats.ts).
+    `ALTER TABLE servers ADD COLUMN issues TEXT`,
+  ],
 ]
 
 async function migrate(db: D1Database) {
@@ -280,10 +285,10 @@ export async function saveReport(db: D1Database, id: string, url: string, report
   // Listing rules: never list a report made with someone's credentials (its tool list may be
   // private), never re-list a server its owner removed, and keep an existing listing on re-share.
   const row = await db
-    .prepare(`INSERT INTO servers (id, url, name, version, grade, score, era, spec_version, tools_count, partial, auth_required, authenticated, report, checked_at, created_at, updated_at, last_attempt_at, listed, failures, tools_text)
-              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15, CASE WHEN ?16 = 1 AND ?12 = 0 THEN 1 ELSE 0 END, 0, ?17)
+    .prepare(`INSERT INTO servers (id, url, name, version, grade, score, era, spec_version, tools_count, partial, auth_required, authenticated, report, checked_at, created_at, updated_at, last_attempt_at, listed, failures, tools_text, issues)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15, CASE WHEN ?16 = 1 AND ?12 = 0 THEN 1 ELSE 0 END, 0, ?17, ?18)
               ON CONFLICT (id) DO UPDATE SET name = ?3, version = ?4, grade = ?5, score = ?6, era = ?7, spec_version = ?8,
-                tools_count = ?9, partial = ?10, auth_required = ?11, authenticated = ?12, report = ?13, checked_at = ?14, updated_at = ?15, tools_text = ?17,
+                tools_count = ?9, partial = ?10, auth_required = ?11, authenticated = ?12, report = ?13, checked_at = ?14, updated_at = ?15, tools_text = ?17, issues = ?18,
                 last_attempt_at = ?15, failures = 0,
                 listed = CASE WHEN servers.blocked = 1 OR ?12 = 1 THEN 0 WHEN ?16 = 1 THEN 1 ELSE servers.listed END
               RETURNING listed, blocked`)
@@ -293,7 +298,7 @@ export async function saveReport(db: D1Database, id: string, url: string, report
       report.serverInfo?.version ?? null,
       report.grade, report.score, report.era ?? null, report.version ?? null,
       report.tools.length, report.partial ? 1 : 0, report.auth?.required ? 1 : 0, report.authenticated ? 1 : 0,
-      blob, report.checkedAt, now, opts.list ? 1 : 0, toolsText(report.tools),
+      blob, report.checkedAt, now, opts.list ? 1 : 0, toolsText(report.tools), issuesOf(report),
     )
     .first<{ listed: number; blocked: number }>()
   if (opts.registry) {

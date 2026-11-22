@@ -8,7 +8,8 @@ import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
 import { atomFeed, deliverPending, pruneEvents, recentEvents, subscribe, unsubscribe, WebhookError } from './alerts'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
-import { claimAttempt, finishAttempt, nextCandidates, registryStats, syncDue, syncStep, type QueuedServer } from './registry'
+import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, type QueuedServer } from './registry'
+import { directoryStats } from './stats'
 import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
 import { checkTarget } from '../security/target'
@@ -218,12 +219,16 @@ app.post('/api/unlist', async (c) => {
 })
 
 // Progress of the registry import and the directory size.
+// Public numbers about the directory. Other sites may read them (the launch post on
+// nischaldhakal.com.np shows them live), and they're cached at the edge for five minutes.
 app.get('/api/stats', async (c) => {
-  const [registry, listed] = await Promise.all([
-    registryStats(c.env.DB),
-    c.env.DB.prepare(`SELECT COUNT(*) AS n FROM servers WHERE listed = 1 AND blocked = 0`).first<number>('n'),
-  ])
-  return c.json({ ok: true, listed: listed ?? 0, registry }, 200, { 'Cache-Control': 'public, max-age=60' })
+  const cache = (caches as unknown as { default: Cache }).default
+  const key = new Request(new URL('/api/stats', c.req.url))
+  const hit = await cache.match(key)
+  if (hit) return hit
+  const res = c.json(await directoryStats(c.env.DB), 200, { 'Cache-Control': 'public, max-age=300', 'Access-Control-Allow-Origin': '*' })
+  c.executionCtx.waitUntil(cache.put(key, res.clone()))
+  return res
 })
 
 
@@ -355,8 +360,13 @@ async function withMeta(env: Env, requestUrl: string, m: { title: string; descri
 const CHECKERS = 4
 
 async function tick(env: Env) {
-  // Search upkeep first. Both are cheap and finish quickly once the indexes are current.
-  if (await backfillToolsText(env.DB)) return
+  // Search upkeep first: fill in derived columns for older reports (in its own invocation, since
+  // unpacking reports takes CPU), and embed changed servers.
+  const backfill = env.CHECKER ? env.CHECKER.backfill() : backfillToolsText(env.DB)
+  await Promise.resolve(backfill).then(
+    (n) => n && console.log('backfilled', n),
+    (err) => console.error('backfill failed', String(err)),
+  )
   await embedPending(env).then(
     (n) => n && console.log('embedded', n),
     (err) => console.error('embedding failed', String(err)),
@@ -384,6 +394,11 @@ async function tick(env: Env) {
 export class Checker extends WorkerEntrypoint<Env> {
   async checkNext(): Promise<boolean> {
     return checkNext(this.env)
+  }
+
+  /** Fill in tool text and issues for a few older reports. */
+  async backfill(): Promise<number> {
+    return backfillToolsText(this.env.DB)
   }
 
   /** Send queued webhook deliveries, and now and then forget old events. */
