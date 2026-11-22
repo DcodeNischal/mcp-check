@@ -1,5 +1,8 @@
 <template>
   <div>
+    <!-- One Turnstile widget for the whole panel, always on the page so it's ready before any
+         "Try it" form opens. Invisible unless Cloudflare needs a click. -->
+    <div ref="turnstileEl" class="mb-3 empty:hidden"></div>
     <p v-if="!tools.length" class="text-sm text-silver">No tools to show.</p>
     <ul v-else class="space-y-3">
       <li v-for="t in tools" :key="t.name" class="rounded-xl border border-white/10 bg-white/[0.02]">
@@ -52,7 +55,6 @@
             <span>This runs against the real server and may change data there. I understand.</span>
           </label>
 
-          <div ref="turnstileEl" class="empty:hidden"></div>
           <button type="submit" :disabled="running || (!isReadOnly(t) && !confirmed)"
                   class="rounded-lg bg-white px-4 py-2 text-sm text-black disabled:opacity-50 cursor-pointer">{{ running ? 'Running…' : 'Run tool' }}</button>
           <p v-if="runError" role="alert" class="text-sm text-rose-300">{{ runError }}</p>

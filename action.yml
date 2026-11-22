@@ -21,7 +21,7 @@ inputs:
     required: false
     default: ''
   headers:
-    description: Extra headers, one "Name: value" per line. Values are masked in the log.
+    description: 'Extra headers, one "Name: value" per line. Values are masked in the log.'
     required: false
     default: ''
   timeout:
