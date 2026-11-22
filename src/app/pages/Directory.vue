@@ -13,7 +13,7 @@
 
     <form class="mt-10 flex flex-col gap-3 md:flex-row md:items-center" role="search" @submit.prevent>
       <label for="dir-search" class="sr-only">Search servers</label>
-      <input id="dir-search" v-model="q" type="search" placeholder="Search by name, URL or description" spellcheck="false"
+      <input id="dir-search" v-model="q" type="search" placeholder="Search by name, tool or what it does, like &quot;send email&quot;" spellcheck="false"
              class="min-w-0 flex-1 rounded-xl border border-white/15 bg-white/[0.03] px-4 py-3 text-sm placeholder:text-silver/60 focus:border-white/40 focus:outline-none" />
       <div class="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by grade">
         <button v-for="g in ['', 'A', 'B', 'C', 'D', 'F']" :key="g || 'all'" type="button" :aria-pressed="grade === g"
@@ -24,7 +24,8 @@
       <label class="flex items-center gap-2 text-xs text-silver">
         Sort
         <select v-model="sort" class="rounded-lg border border-white/15 bg-black px-2 py-1.5 text-xs text-white">
-          <option value="grade">Best grade</option>
+          <option value="">{{ searching ? 'Best match' : 'Best grade' }}</option>
+          <option v-if="searching" value="grade">Best grade</option>
           <option value="recent">Recently checked</option>
         </select>
       </label>
@@ -50,6 +51,7 @@
             <span class="block truncate text-sm text-white">{{ s.name || hostOf(s.url) }}</span>
             <span class="block truncate font-mono text-xs text-silver">{{ s.url }}</span>
             <span v-if="s.description" class="mt-1 block truncate text-xs text-silver/80">{{ s.description }}</span>
+            <span v-if="s.match" class="mt-1 block truncate font-mono text-[11px] text-emerald-300/90">{{ s.match }}</span>
           </span>
           <span class="hidden shrink-0 text-right text-xs text-silver sm:block">
             <span class="block">{{ s.auth_required ? 'Sign-in required' : `${s.tools_count} tool${s.tools_count === 1 ? '' : 's'}` }}</span>
@@ -77,7 +79,9 @@ const route = useRoute()
 const router = useRouter()
 const q = ref(String(route.query.q ?? ''))
 const grade = ref(/^[ABCDF]$/.test(String(route.query.grade ?? '')) ? String(route.query.grade) : '')
-const sort = ref(route.query.sort === 'recent' ? 'recent' : 'grade')
+// '' means the default order: best match while searching, best grade otherwise.
+const sort = ref(route.query.sort === 'recent' || route.query.sort === 'grade' ? String(route.query.sort) : '')
+const searching = computed(() => q.value.trim() !== '')
 const page = ref(Math.max(1, Number(route.query.page) || 1))
 const servers = ref<DirectoryEntry[]>([])
 const total = ref(0)
@@ -90,7 +94,7 @@ async function load() {
   const ticket = ++latest
   state.value = 'loading'
   // Keep the filters in the address bar so a filtered view can be shared or bookmarked.
-  router.replace({ query: { ...(q.value ? { q: q.value } : {}), ...(grade.value ? { grade: grade.value } : {}), ...(sort.value !== 'grade' ? { sort: sort.value } : {}), ...(page.value > 1 ? { page: String(page.value) } : {}) } })
+  router.replace({ query: { ...(q.value ? { q: q.value } : {}), ...(grade.value ? { grade: grade.value } : {}), ...(sort.value ? { sort: sort.value } : {}), ...(page.value > 1 ? { page: String(page.value) } : {}) } })
   try {
     const res = await listServers({ q: q.value.trim(), grade: grade.value, sort: sort.value, page: page.value })
     if (ticket !== latest) return
@@ -111,6 +115,8 @@ function setGrade(g: string) {
 let timer: ReturnType<typeof setTimeout> | undefined
 watch(q, () => {
   clearTimeout(timer)
+  // "Best grade" is only a separate choice while searching.
+  if (!searching.value && sort.value === 'grade') sort.value = ''
   timer = setTimeout(() => {
     page.value = 1
     void load()

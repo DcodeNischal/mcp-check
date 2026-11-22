@@ -76,6 +76,8 @@ export interface DirectoryEntry {
   auth_required: number
   checked_at: string
   description: string | null
+  /** Why a search result matched, when it isn't obvious from the name or description. */
+  match?: string
 }
 
 export async function listServers(params: { q?: string; grade?: string; sort?: string; page?: number }) {

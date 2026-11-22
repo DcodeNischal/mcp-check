@@ -2,6 +2,7 @@
 // visitor shares one, and only if it carries a valid signature from this Worker, so nobody can
 // upload a made-up grade.
 import type { Report } from '../checks/types'
+import { toolsText } from './search'
 
 const MAX_RECEIPT_AGE_MS = 60 * 60 * 1000
 
@@ -72,6 +73,31 @@ const MIGRATIONS: string[][] = [
       last_seen_at TEXT NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS registry_pending ON registry (status, last_attempt_at)`,
+  ],
+  [
+    // Search: tool names and descriptions as text, a keyword index kept current by triggers,
+    // and a flag for servers whose text changed since they were last embedded.
+    `ALTER TABLE servers ADD COLUMN tools_text TEXT`,
+    `ALTER TABLE servers ADD COLUMN embed_stale INTEGER NOT NULL DEFAULT 1`,
+    `CREATE VIRTUAL TABLE IF NOT EXISTS server_search USING fts5(id UNINDEXED, name, description, tools, url, tokenize = 'porter unicode61')`,
+    `CREATE TRIGGER IF NOT EXISTS servers_search_insert AFTER INSERT ON servers WHEN new.listed = 1 AND new.blocked = 0 BEGIN
+      INSERT INTO server_search (rowid, id, name, description, tools, url) VALUES (new.rowid, new.id, trim(coalesce(new.name, '') || ' ' || coalesce(new.registry_name, '')), coalesce(new.description, ''), coalesce(new.tools_text, ''), new.url);
+    END`,
+    `CREATE TRIGGER IF NOT EXISTS servers_search_update AFTER UPDATE OF name, registry_name, description, tools_text, url, listed, blocked ON servers BEGIN
+      DELETE FROM server_search WHERE rowid = old.rowid;
+      INSERT INTO server_search (rowid, id, name, description, tools, url) SELECT new.rowid, new.id, trim(coalesce(new.name, '') || ' ' || coalesce(new.registry_name, '')), coalesce(new.description, ''), coalesce(new.tools_text, ''), new.url WHERE new.listed = 1 AND new.blocked = 0;
+    END`,
+    `CREATE TRIGGER IF NOT EXISTS servers_search_delete AFTER DELETE ON servers BEGIN
+      DELETE FROM server_search WHERE rowid = old.rowid;
+    END`,
+    `CREATE TRIGGER IF NOT EXISTS servers_embed_stale AFTER UPDATE OF name, registry_name, description, tools_text ON servers
+      WHEN old.name IS NOT new.name OR old.registry_name IS NOT new.registry_name OR old.description IS NOT new.description OR old.tools_text IS NOT new.tools_text BEGIN
+      UPDATE servers SET embed_stale = 1 WHERE rowid = new.rowid;
+    END`,
+    // Index what's already listed. Clearing first makes this safe to run again.
+    `DELETE FROM server_search`,
+    `INSERT INTO server_search (rowid, id, name, description, tools, url)
+      SELECT rowid, id, trim(coalesce(name, '') || ' ' || coalesce(registry_name, '')), coalesce(description, ''), coalesce(tools_text, ''), url FROM servers WHERE listed = 1 AND blocked = 0`,
   ],
 ]
 
@@ -177,10 +203,10 @@ export async function saveReport(db: D1Database, id: string, url: string, report
   // Listing rules: never list a report made with someone's credentials (its tool list may be
   // private), never re-list a server its owner removed, and keep an existing listing on re-share.
   const row = await db
-    .prepare(`INSERT INTO servers (id, url, name, version, grade, score, era, spec_version, tools_count, partial, auth_required, authenticated, report, checked_at, created_at, updated_at, last_attempt_at, listed, failures)
-              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15, CASE WHEN ?16 = 1 AND ?12 = 0 THEN 1 ELSE 0 END, 0)
+    .prepare(`INSERT INTO servers (id, url, name, version, grade, score, era, spec_version, tools_count, partial, auth_required, authenticated, report, checked_at, created_at, updated_at, last_attempt_at, listed, failures, tools_text)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15, CASE WHEN ?16 = 1 AND ?12 = 0 THEN 1 ELSE 0 END, 0, ?17)
               ON CONFLICT (id) DO UPDATE SET name = ?3, version = ?4, grade = ?5, score = ?6, era = ?7, spec_version = ?8,
-                tools_count = ?9, partial = ?10, auth_required = ?11, authenticated = ?12, report = ?13, checked_at = ?14, updated_at = ?15,
+                tools_count = ?9, partial = ?10, auth_required = ?11, authenticated = ?12, report = ?13, checked_at = ?14, updated_at = ?15, tools_text = ?17,
                 last_attempt_at = ?15, failures = 0,
                 listed = CASE WHEN servers.blocked = 1 OR ?12 = 1 THEN 0 WHEN ?16 = 1 THEN 1 ELSE servers.listed END
               RETURNING listed, blocked`)
@@ -190,7 +216,7 @@ export async function saveReport(db: D1Database, id: string, url: string, report
       report.serverInfo?.version ?? null,
       report.grade, report.score, report.era ?? null, report.version ?? null,
       report.tools.length, report.partial ? 1 : 0, report.auth?.required ? 1 : 0, report.authenticated ? 1 : 0,
-      blob, report.checkedAt, now, opts.list ? 1 : 0,
+      blob, report.checkedAt, now, opts.list ? 1 : 0, toolsText(report.tools),
     )
     .first<{ listed: number; blocked: number }>()
   if (opts.registry) {
@@ -326,7 +352,7 @@ async function gzip(text: string): Promise<Uint8Array> {
   return new Uint8Array(await new Response(stream).arrayBuffer())
 }
 
-async function gunzip(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
+export async function gunzip(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
   return new Response(stream).text()
 }

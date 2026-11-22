@@ -46,6 +46,30 @@ placeholders, query strings) or have no public URL are skipped, and a server is 
 failed attempts. Every request sends `User-Agent: MCP-Check/0.1 (+https://mcp.nischaldhakal.com.np)`.
 Progress: `GET /api/stats`.
 
+## Search
+
+Directory search combines two rankings with reciprocal rank fusion:
+
+- **Keywords**: a SQLite FTS5 index in D1 over each server's name, description, tools and URL, kept
+  current by triggers on the `servers` table. Results say which tool matched.
+- **Meaning** (optional): each server's name, description and tools are embedded with Workers AI
+  (`@cf/baai/bge-small-en-v1.5`, 384 dimensions) into a Vectorize index, so "send email" also finds a
+  Gmail server. The cron run embeds up to 25 changed servers at a time.
+
+To turn on meaning search, create the index and add the bindings to `wrangler.jsonc`:
+
+```bash
+npx wrangler vectorize create mcp-servers --dimensions=384 --metric=cosine
+```
+
+```jsonc
+"ai": { "binding": "AI" },
+"vectorize": [{ "binding": "VECTORS", "index_name": "mcp-servers" }],
+```
+
+Without them, or if either fails or runs out of free quota, search uses keywords only. Searches are
+cached at the edge for a minute.
+
 ## Develop
 
 ```bash
@@ -64,6 +88,8 @@ npm run build
 - [x] Turnstile and abuse protection for the public API
 - [x] Shareable reports and README badges
 - [x] Public directory with server pages and weekly re-checks
+- [x] Automatic import from the official MCP Registry
+- [x] Hybrid search: keywords and meaning
 - [ ] OAuth sign-in to inspect protected servers
 - [ ] `npx mcp-check` CLI and GitHub Action
 - [ ] Webhook and RSS alerts

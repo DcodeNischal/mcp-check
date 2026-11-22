@@ -5,6 +5,7 @@ import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
 import { finishAttempt, nextCandidate, registryStats, startAttempt, syncDue, syncStep } from './registry'
+import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
 import { checkTarget } from '../security/target'
 import { verifyTurnstile, type TurnstileEnv } from './turnstile'
@@ -13,6 +14,9 @@ export interface Env extends TurnstileEnv {
   /** Local development only: skip Turnstile, and only when the request host is localhost. */
   DEV_SKIP_TURNSTILE?: string
   DB: D1Database
+  /** Optional: meaning search. Without these, directory search uses keywords only. */
+  AI?: Ai
+  VECTORS?: Vectorize
   CHECK_LIMITER: RateLimit
   ASSETS: Fetcher
 }
@@ -115,10 +119,26 @@ app.get('/api/report/:id', async (c) => {
 app.get('/api/servers', async (c) => {
   const search = (c.req.query('q') ?? '').trim().slice(0, 100)
   const grade = (c.req.query('grade') ?? '').toUpperCase()
-  const sort = c.req.query('sort') === 'recent' ? 'recent' : 'grade'
+  const sortParam = c.req.query('sort')
   const page = Math.min(1000, Math.max(1, Number.parseInt(c.req.query('page') ?? '1', 10) || 1))
-  const result = await listServers(c.env.DB, { search, sort, page, ...(/^[ABCDF]$/.test(grade) ? { grade } : {}) })
-  return c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
+  const gradeFilter = /^[ABCDF]$/.test(grade) ? { grade } : {}
+  if (!search) {
+    const sort = sortParam === 'recent' ? 'recent' : 'grade'
+    const result = await listServers(c.env.DB, { sort, page, ...gradeFilter })
+    return c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
+  }
+
+  // Searches cost an embedding each, so identical ones are answered from the edge cache for a minute.
+  // The Workers runtime adds caches.default; the DOM types used by the app don't know it.
+  const cache = (caches as unknown as { default: Cache }).default
+  const key = new Request(new URL(`/api/servers?${new URLSearchParams({ q: search.toLowerCase(), sort: sortParam ?? '', page: String(page), grade })}`, c.req.url))
+  const hit = await cache.match(key)
+  if (hit) return hit
+  const sort = sortParam === 'recent' || sortParam === 'grade' ? sortParam : 'relevance'
+  const result = await searchServers(c.env, { search, sort, page, pageSize: PAGE_SIZE, ...gradeFilter })
+  const res = c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
+  c.executionCtx.waitUntil(cache.put(key, res.clone()))
+  return res
 })
 
 // Owner removal: the server's domain must serve /.well-known/mcp-check.txt containing
@@ -240,6 +260,12 @@ async function withMeta(env: Env, requestUrl: string, m: { title: string; descri
 // 2. otherwise check one server from the registry queue and list it if it responds;
 // 3. otherwise re-check one listed server whose report is over a week old.
 async function tick(env: Env) {
+  // Search upkeep first. Both are cheap and finish quickly once the indexes are current.
+  if (await backfillToolsText(env.DB)) return
+  await embedPending(env).then(
+    (n) => n && console.log('embedded', n),
+    (err) => console.error('embedding failed', String(err)),
+  )
   if (await syncDue(env.DB)) {
     const step = await syncStep(env.DB)
     console.log('registry sync', step)
