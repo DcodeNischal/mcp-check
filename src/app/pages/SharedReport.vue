@@ -27,6 +27,7 @@
             <p class="text-xs text-silver">Re-checking and sharing updates this report and its badge.</p>
             <RouterLink v-if="listed" to="/servers" class="ml-auto rounded-full bg-emerald-400/10 px-3 py-1 text-xs text-emerald-300">In the public directory</RouterLink>
           </div>
+          <AlertsBox v-if="listed" :id="id" />
           <details v-if="listed" class="mt-4 text-xs text-silver">
             <summary class="cursor-pointer hover:text-white">Own this server? Remove it from the directory</summary>
             <div class="mt-3 space-y-3 rounded-xl border border-white/10 bg-white/[0.02] p-4 leading-relaxed">
@@ -48,6 +49,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ApiError, getReport, unlistServer, type RegistryInfo, type Report } from '../api'
+import AlertsBox from '../components/AlertsBox.vue'
 import ReportView from '../components/ReportView.vue'
 
 const route = useRoute()

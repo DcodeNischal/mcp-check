@@ -6,6 +6,7 @@ import { runTool } from '../checks/call'
 import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
+import { atomFeed, deliverPending, pruneEvents, recentEvents, subscribe, unsubscribe, WebhookError } from './alerts'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
 import { claimAttempt, finishAttempt, nextCandidates, registryStats, syncDue, syncStep, type QueuedServer } from './registry'
 import { backfillToolsText, embedPending, searchServers } from './search'
@@ -28,6 +29,8 @@ export interface Env extends TurnstileEnv {
 
 const app = new Hono<{ Bindings: Env }>()
 const VANTAGE = "Cloudflare's network"
+/** Used in alerts sent from cron runs, which have no request to take the origin from. */
+const SITE_ORIGIN = 'https://mcp.nischaldhakal.com.np'
 
 app.get('/api/health', (c) => c.json({ ok: true }))
 
@@ -223,7 +226,49 @@ app.get('/api/stats', async (c) => {
   return c.json({ ok: true, listed: listed ?? 0, registry }, 200, { 'Cache-Control': 'public, max-age=60' })
 })
 
-app.all('/api/*', (c) => c.json({ ok: false, error: 'not-found' }, 404))
+
+// --- alerts (see src/worker/alerts.ts) ------------------------------------------------------
+
+const ATOM = { 'Content-Type': 'application/atom+xml; charset=utf-8', 'Cache-Control': 'public, max-age=300' }
+
+app.get('/feed.xml', async (c) => {
+  const origin = new URL(c.req.url).origin
+  const events = await recentEvents(c.env.DB)
+  return c.body(atomFeed({ origin, path: '/feed.xml', title: 'MCP Check directory', subtitle: 'Servers added to the MCP Check directory, grade changes, and servers that stopped responding.', link: `${origin}/servers`, events }), 200, ATOM)
+})
+
+app.get('/r/:id/feed.xml', async (c) => {
+  const id = c.req.param('id')
+  const origin = new URL(c.req.url).origin
+  const found = ID.test(id) ? await loadGrade(c.env.DB, id) : undefined
+  if (!found) return c.text('Not found', 404)
+  const [events, server] = await Promise.all([
+    recentEvents(c.env.DB, id),
+    c.env.DB.prepare(`SELECT name, url FROM servers WHERE id = ?1`).bind(id).first<{ name: string | null; url: string }>(),
+  ])
+  const name = server?.name || server?.url || id
+  return c.body(atomFeed({ origin, path: `/r/${id}/feed.xml`, title: `${name} on MCP Check`, subtitle: `Grade changes for ${name}.`, link: `${origin}/r/${id}`, events }), 200, ATOM)
+})
+
+app.post('/api/webhooks', async (c) => {
+  const g = await guard(c, 'alerts')
+  if (g.fail) return c.json({ ok: false, error: g.fail.error, message: g.fail.message }, g.fail.status)
+  const serverId = typeof g.body.id === 'string' ? g.body.id : ''
+  if (!ID.test(serverId)) return c.json({ ok: false, error: 'not-found', message: 'No server with this id.' }, 404)
+  try {
+    const hook = await subscribe(c.env.DB, serverId, (g.body.url as string).trim(), new URL(c.req.url).origin)
+    return c.json({ ok: true, ...hook }, 200, { 'Cache-Control': 'no-store' })
+  } catch (err) {
+    if (err instanceof WebhookError) return c.json({ ok: false, error: 'invalid', message: err.message }, 400)
+    throw err
+  }
+})
+
+app.post('/api/webhooks/:hook/delete', async (c) => {
+  const body = (await c.req.json().catch(() => null)) as { secret?: unknown } | null
+  const ok = typeof body?.secret === 'string' && (await unsubscribe(c.env.DB, c.req.param('hook'), body.secret))
+  return ok ? c.json({ ok: true }) : c.json({ ok: false, error: 'not-found', message: 'No webhook with this id and secret.' }, 404)
+})
 
 app.get('/sitemap.xml', async (c) => {
   const origin = new URL(c.req.url).origin
@@ -268,13 +313,13 @@ app.get('/r/:id', async (c) => {
   const problems = report.checks.filter((x) => x.status === 'fail' || x.status === 'warn').length
   const title = `${name}: grade ${report.grade} (${report.score}/100) · MCP Check`
   const description = `${report.partial ? 'Partial grade (sign-in needed for tools). ' : ''}${report.tools.length} tools · spec ${report.version ?? 'unknown'} · ${problems ? `${problems} thing${problems === 1 ? '' : 's'} to fix` : 'no issues found'}. Checked ${report.checkedAt.slice(0, 10)}.`
-  return withMeta(c.env, c.req.url, { title, description, url: `${origin}/r/${id}`, image: `${origin}/og/grade-${report.grade}.png` })
+  return withMeta(c.env, c.req.url, { title, description, url: `${origin}/r/${id}`, image: `${origin}/og/grade-${report.grade}.png`, feed: { title: `${title} (updates)`, href: `${origin}/r/${id}/feed.xml` } })
 })
 
 const ID = /^[a-z2-9]{12}$/
 
 /** The app's HTML with a page-specific title, description and share-preview tags. */
-async function withMeta(env: Env, requestUrl: string, m: { title: string; description: string; url: string; image: string }): Promise<Response> {
+async function withMeta(env: Env, requestUrl: string, m: { title: string; description: string; url: string; image: string; feed?: { title: string; href: string } }): Promise<Response> {
   const page = await env.ASSETS.fetch(new Request(new URL('/', requestUrl)))
   const meta: [string, string, string][] = [
     ['name', 'description', m.description],
@@ -288,7 +333,8 @@ async function withMeta(env: Env, requestUrl: string, m: { title: string; descri
     ['property', 'og:image:height', '630'],
     ['name', 'twitter:card', 'summary_large_image'],
   ]
-  const tags = meta.map(([attr, key, value]) => `<meta ${attr}="${key}" content="${escapeAttr(value)}">`).join('') + `<link rel="canonical" href="${escapeAttr(m.url)}">`
+  const feed = m.feed ? `<link rel="alternate" type="application/atom+xml" title="${escapeAttr(m.feed.title)}" href="${escapeAttr(m.feed.href)}">` : ''
+  const tags = meta.map(([attr, key, value]) => `<meta ${attr}="${key}" content="${escapeAttr(value)}">`).join('') + `<link rel="canonical" href="${escapeAttr(m.url)}">` + feed
   const rewritten = new HTMLRewriter()
     .on('title', { element: (el) => { el.setInnerContent(m.title) } })
     // Drop the home page's own description and preview tags; these replace them.
@@ -321,17 +367,29 @@ async function tick(env: Env) {
       (err) => console.error('registry sync failed', String(err)),
     )
   }
+  // Webhook deliveries, in their own invocation.
+  const alerts = env.CHECKER ? env.CHECKER.deliverAlerts() : deliverPending(env.DB, SITE_ORIGIN)
   // Without the binding (tests, misconfiguration), check one server in this run instead.
   const checker = env.CHECKER
   const runs = checker ? Array.from({ length: CHECKERS }, () => checker.checkNext()) : [checkNext(env)]
   const checked = await Promise.all(runs.map((r) => Promise.resolve(r).catch((err) => (console.error('checker failed', String(err)), false))))
   if (!checked.some(Boolean)) await recheck(env)
+  await Promise.resolve(alerts).then(
+    (n) => n && console.log('alerts delivered', n),
+    (err) => console.error('alerts failed', String(err)),
+  )
 }
 
 /** Checks one queued server per call. The cron run calls it through a service binding to itself. */
 export class Checker extends WorkerEntrypoint<Env> {
   async checkNext(): Promise<boolean> {
     return checkNext(this.env)
+  }
+
+  /** Send queued webhook deliveries, and now and then forget old events. */
+  async deliverAlerts(): Promise<number> {
+    if (Math.random() < 1 / 60) await pruneEvents(this.env.DB)
+    return deliverPending(this.env.DB, SITE_ORIGIN)
   }
 }
 
@@ -370,6 +428,9 @@ async function recheck(env: Env) {
     console.log('recheck', server.id, report.connected || report.auth ? report.grade : 'unreachable')
   }
 }
+
+// Any other /api path. Registered last so it never shadows a real route.
+app.all('/api/*', (c) => c.json({ ok: false, error: 'not-found' }, 404))
 
 function escapeAttr(s: string): string {
   return s.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!)

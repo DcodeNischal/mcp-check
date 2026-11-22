@@ -95,6 +95,9 @@ export async function listServers(params: { q?: string; grade?: string; sort?: s
   return { servers: data.servers, total: data.total ?? 0, pageSize: data.pageSize ?? 30 }
 }
 
+export const subscribeWebhook = (id: string, url: string, token: string) =>
+  post<{ ok: true; id: string; secret: string; format: 'json' | 'slack' | 'discord' }>('/api/webhooks', { id, url, token })
+
 export const unlistServer = (id: string) => post<{ ok: true; message: string }>('/api/unlist', { id })
 
 export const callTool = (target: Target, tool: string, args: Record<string, unknown>, token: string) =>

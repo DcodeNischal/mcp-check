@@ -63,6 +63,32 @@ The sign-in is tied to the browser that started it with a cookie. After the call
 the access token only until the page claims it (once, within ten minutes), then deletes it. The token
 then lives only in that browser tab, and reports made while signed in are never listed.
 
+## Alerts
+
+- **Feeds:** [`/feed.xml`](https://mcp.nischaldhakal.com.np/feed.xml) lists servers added to the
+  directory, grade changes, and servers dropped after failing three weekly re-checks in a row. Each
+  server has its own feed at `/r/<id>/feed.xml`.
+- **Webhooks:** from a server's page, anyone can add a webhook (up to five per server). It must answer
+  a test message with 2xx first. Slack and Discord webhook URLs get a readable message; other URLs get
+  JSON like this, signed with `X-MCP-Check-Signature: sha256=<HMAC-SHA256 of the body>`:
+
+  ```json
+  {
+    "type": "grade_changed",
+    "server": { "id": "…", "url": "https://…/mcp", "name": "…", "reportUrl": "https://mcp.nischaldhakal.com.np/r/…" },
+    "grade": "A", "previousGrade": "C", "score": 93, "previousScore": 74,
+    "message": "… improved from C to A (74 → 93/100)",
+    "at": "2026-11-23T01:00:00.000Z"
+  }
+  ```
+
+  `type` is `listed`, `grade_changed` or `unreachable` (and `ping` for the test). Failed deliveries are
+  retried after 5 minutes, 30 minutes and 2 hours; a webhook is switched off after ten dropped deliveries
+  in a row. To remove one: `POST /api/webhooks/<id>/delete` with `{"secret": "…"}`.
+
+Events are recorded by triggers on the `servers` table, so every path that lists, re-grades or drops a
+server produces one. A server's owner removing it doesn't.
+
 ## Search
 
 Directory search combines two rankings with reciprocal rank fusion:
@@ -149,7 +175,7 @@ npm run build
 - [x] Hybrid search: keywords and meaning
 - [x] OAuth sign-in to inspect protected servers
 - [x] `npx @dcodenischal/mcp-check` command line and GitHub Action
-- [ ] Webhook and RSS alerts
+- [x] Webhook and feed alerts
 
 ## License
 

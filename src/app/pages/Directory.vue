@@ -8,6 +8,7 @@
         <a href="https://registry.modelcontextprotocol.io" target="_blank" rel="noopener" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">official MCP Registry</a>
         are added automatically.
         Want yours listed? <RouterLink to="/" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">Check it</RouterLink>, then share it to the directory.
+        Follow new servers and grade changes with the <a href="/feed.xml" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">feed</a>.
       </p>
     </section>
 

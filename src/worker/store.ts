@@ -129,6 +129,57 @@ const MIGRATIONS: string[][] = [
       PRIMARY KEY (issuer, redirect_uri)
     )`,
   ],
+  [
+    // Alerts: events recorded by triggers whenever a server is listed, changes grade, or is
+    // dropped after failing re-checks (not when its owner removes it), and webhook deliveries
+    // queued for each event. See src/worker/alerts.ts.
+    `CREATE TABLE IF NOT EXISTS events (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      server_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      grade TEXT,
+      prev_grade TEXT,
+      score INTEGER,
+      prev_score INTEGER,
+      at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS events_server ON events (server_id, seq)`,
+    `CREATE TABLE IF NOT EXISTS webhooks (
+      id TEXT PRIMARY KEY,
+      server_id TEXT NOT NULL,
+      url TEXT NOT NULL,
+      secret TEXT NOT NULL,
+      format TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1,
+      failures INTEGER NOT NULL DEFAULT 0,
+      last_status INTEGER,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS webhooks_server ON webhooks (server_id, active)`,
+    `CREATE TABLE IF NOT EXISTS deliveries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      webhook_id TEXT NOT NULL,
+      event_seq INTEGER NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS deliveries_due ON deliveries (next_at)`,
+    `CREATE TRIGGER IF NOT EXISTS servers_event_new AFTER INSERT ON servers WHEN new.listed = 1 BEGIN
+      INSERT INTO events (server_id, type, grade, score, at) VALUES (new.id, 'listed', new.grade, new.score, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    END`,
+    `CREATE TRIGGER IF NOT EXISTS servers_event_listed AFTER UPDATE OF listed ON servers WHEN old.listed = 0 AND new.listed = 1 BEGIN
+      INSERT INTO events (server_id, type, grade, score, at) VALUES (new.id, 'listed', new.grade, new.score, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    END`,
+    `CREATE TRIGGER IF NOT EXISTS servers_event_grade AFTER UPDATE OF grade ON servers WHEN old.listed = 1 AND new.listed = 1 AND old.grade IS NOT new.grade BEGIN
+      INSERT INTO events (server_id, type, grade, prev_grade, score, prev_score, at) VALUES (new.id, 'grade_changed', new.grade, old.grade, new.score, old.score, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    END`,
+    `CREATE TRIGGER IF NOT EXISTS servers_event_unreachable AFTER UPDATE OF listed ON servers WHEN old.listed = 1 AND new.listed = 0 AND new.blocked = 0 AND new.failures >= 3 BEGIN
+      INSERT INTO events (server_id, type, grade, score, at) VALUES (new.id, 'unreachable', new.grade, new.score, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    END`,
+    `CREATE TRIGGER IF NOT EXISTS events_queue_deliveries AFTER INSERT ON events BEGIN
+      INSERT INTO deliveries (webhook_id, event_seq, attempts, next_at) SELECT id, new.seq, 0, new.at FROM webhooks WHERE server_id = new.server_id AND active = 1;
+    END`,
+  ],
 ]
 
 async function migrate(db: D1Database) {
