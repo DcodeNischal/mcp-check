@@ -14,8 +14,12 @@ export interface SearchEnv {
 export const EMBED_MODEL = '@cf/baai/bge-small-en-v1.5'
 /** bge-v1.5 retrieves better when short queries carry this instruction (documents don't). */
 const QUERY_PREFIX = 'Represent this sentence for searching relevant passages: '
-/** Cosine similarity below this is treated as unrelated. */
-export const MIN_SIMILARITY = 0.6
+/**
+ * Cosine similarity below this is treated as unrelated. Measured with bge-small and the query
+ * prefix: relevant pairs scored 0.57-0.70 ("send email" vs a Gmail server 0.57), unrelated
+ * ones 0.30-0.51.
+ */
+export const MIN_SIMILARITY = 0.55
 const KEYWORD_LIMIT = 100
 const VECTOR_LIMIT = 50
 const EMBED_BATCH = 25
