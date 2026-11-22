@@ -15,6 +15,8 @@ export interface CheckOptions extends TargetPolicy {
   timeoutMs?: number
   /** Where speed is measured from, shown in the report ("Cloudflare's network", "your machine"). */
   vantage?: string
+  /** Filled with every HTTP exchange of the check, for the raw log. */
+  logSink?: Exchange[]
 }
 
 const PROBE_TOOL = 'mcp_check_probe_nonexistent_tool'
@@ -111,6 +113,7 @@ export async function runCheck(rawUrl: string, opts: CheckOptions = {}): Promise
     return finish(report, checks, started)
   } finally {
     await client.close().catch(() => {})
+    opts.logSink?.push(...client.log)
   }
 }
 

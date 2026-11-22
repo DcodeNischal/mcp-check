@@ -15,5 +15,7 @@
   "ratelimits": [
     { "name": "CHECK_LIMITER", "namespace_id": "1001", "simple": { "limit": 20, "period": 60 } }
   ],
+  // Turnstile tokens must come from this hostname. The secret is a Worker secret (TURNSTILE_SECRET).
+  "vars": { "TURNSTILE_HOSTNAMES": "mcp.nischaldhakal.com.np" },
   "observability": { "enabled": true }
 }

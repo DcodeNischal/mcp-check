@@ -42,8 +42,8 @@ npm run build
 
 - [x] MCP client for all three eras, with auth discovery
 - [x] Graded checks with fix advice
-- [ ] Checker interface, explorer (run tools), raw message log
-- [ ] Turnstile and abuse protection for the public API
+- [x] Checker interface, explorer (run tools), raw message log
+- [x] Turnstile and abuse protection for the public API
 - [ ] Shareable reports and README badges
 - [ ] Public directory with server pages and nightly re-checks
 - [ ] OAuth sign-in to inspect protected servers
