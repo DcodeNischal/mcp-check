@@ -13,10 +13,20 @@
 
     <details class="mt-3 group" :open="showAuth" @toggle="showAuth = ($event.target as HTMLDetailsElement).open">
       <summary class="cursor-pointer list-none text-xs text-silver hover:text-white">
-        <span class="inline-block transition group-open:rotate-90">›</span> Token or custom headers (for protected servers)
+        <span class="inline-block transition group-open:rotate-90">›</span> Sign in, token or custom headers (for protected servers)
       </summary>
       <div class="mt-3 space-y-3 rounded-xl border border-white/10 bg-white/[0.02] p-4">
-        <label class="block">
+        <div v-if="signedIn" class="flex flex-wrap items-center gap-3 text-sm">
+          <span class="text-emerald-300">✓ Signed in with OAuth</span>
+          <button type="button" class="text-xs text-silver underline decoration-white/30 underline-offset-4 hover:text-white cursor-pointer" @click="signOut">Sign out</button>
+        </div>
+        <div v-else class="flex flex-wrap items-center gap-3">
+          <button type="button" :disabled="busy || signingIn" class="rounded-lg border border-white/20 px-3 py-2 text-sm text-white transition hover:border-white/50 disabled:opacity-60 cursor-pointer" @click="signIn">
+            {{ signingIn ? 'Opening sign-in…' : 'Sign in with OAuth' }}
+          </button>
+          <span class="text-xs text-silver/80">Uses the server's own sign-in page. Or paste a token:</span>
+        </div>
+        <label v-if="!signedIn" class="block">
           <span class="text-[11px] font-mono uppercase tracking-widest text-silver">Bearer token</span>
           <input v-model="token" type="password" autocomplete="off" spellcheck="false" placeholder="Optional"
                  class="mt-1.5 w-full rounded-lg border border-white/15 bg-transparent px-3 py-2 font-mono text-sm focus:border-white/40 focus:outline-none" />
@@ -29,7 +39,7 @@
           <button type="button" class="px-2 text-silver hover:text-white cursor-pointer" :aria-label="`Remove header ${h.name || i + 1}`" @click="extra.splice(i, 1)">✕</button>
         </div>
         <button v-if="extra.length < 5" type="button" class="text-xs text-silver hover:text-white cursor-pointer" @click="extra.push({ name: '', value: '' })">+ Add header</button>
-        <p class="text-xs leading-relaxed text-silver/80">Sent only to the server you're checking, for this check. Never stored or shown in reports.</p>
+        <p class="text-xs leading-relaxed text-silver/80">Sent only to the server you're checking, for this check. Never stored or shown in reports, and reports made while signed in are never listed in the directory.</p>
       </div>
     </details>
 
@@ -44,12 +54,15 @@ import type { Target } from '../api'
 import { useTurnstile } from '../turnstile'
 
 defineProps<{ busy: boolean; error?: string }>()
-const emit = defineEmits<{ submit: [target: Target, token: string] }>()
+const emit = defineEmits<{ submit: [target: Target, token: string]; signin: [url: string, token: string] }>()
 
 const url = ref('')
 const token = ref('')
 const extra = ref<{ name: string; value: string }[]>([])
 const showAuth = ref(false)
+/** The token came from an OAuth sign-in: hide it and offer to sign out instead. */
+const signedIn = ref(false)
+const signingIn = ref(false)
 const { el: turnstileEl, getToken, reset } = useTurnstile('check')
 
 onMounted(() => {
@@ -67,5 +80,34 @@ async function submit() {
   reset()
 }
 
-defineExpose({ setUrl: (u: string) => (url.value = u) })
+async function signIn() {
+  const target = url.value.trim()
+  if (!target) return document.getElementById('server-url')?.focus()
+  signingIn.value = true
+  try {
+    const human = await getToken()
+    emit('signin', target, human)
+    reset()
+  } finally {
+    signingIn.value = false
+  }
+}
+
+function signOut() {
+  token.value = ''
+  signedIn.value = false
+}
+
+defineExpose({
+  setUrl: (u: string) => (url.value = u),
+  /** Use a token from an OAuth sign-in for this server. */
+  useSignIn(u: string, accessToken: string) {
+    url.value = u
+    token.value = accessToken
+    signedIn.value = true
+    showAuth.value = true
+  },
+  signIn,
+  submit,
+})
 </script>

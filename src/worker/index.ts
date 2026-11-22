@@ -1,9 +1,11 @@
 // The Worker: serves the API. Static files (the app) are served by Cloudflare before this runs.
 import { Hono } from 'hono'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { runTool } from '../checks/call'
 import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
+import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
 import { finishAttempt, nextCandidates, registryStats, startAttempt, syncDue, syncStep, type QueuedServer } from './registry'
 import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
@@ -85,6 +87,46 @@ app.post('/api/call', async (c) => {
   if (args !== undefined && (!args || typeof args !== 'object' || Array.isArray(args))) return c.json({ ok: false, error: 'bad-request', message: 'Arguments must be an object.' }, 400)
   const outcome = await runTool(g.body.url as string, tool, (args ?? {}) as Record<string, unknown>, { headers: g.headers })
   return c.json({ ...outcome, log: trimLog(outcome.log) }, 200, { 'Cache-Control': 'no-store' })
+})
+
+// --- OAuth sign-in (see src/worker/oauth.ts) ---------------------------------------------------
+// The state is tied to the visitor's browser with a cookie, so a sign-in can only be finished and
+// claimed by the browser that started it.
+
+app.post('/api/oauth/start', async (c) => {
+  const g = await guard(c, 'check')
+  if (g.fail) return c.json({ ok: false, error: g.fail.error, message: g.fail.message }, g.fail.status)
+  const url = (g.body.url as string).trim()
+  const target = checkTarget(url)
+  if (!target.ok) return c.json({ ok: false, error: 'invalid', message: target.reason }, 400)
+  try {
+    const { authorizeUrl, state } = await startSignIn(c.env.DB, url, new URL(c.req.url).origin)
+    setCookie(c, COOKIE, state, { httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: PENDING_TTL_S, prefix: 'host' })
+    return c.json({ ok: true, authorizeUrl }, 200, { 'Cache-Control': 'no-store' })
+  } catch (err) {
+    if (err instanceof SignInError) return c.json({ ok: false, error: 'signin', message: err.message }, 400)
+    throw err
+  }
+})
+
+app.get('/oauth/client.json', (c) => c.json(clientMetadata(new URL(c.req.url).origin), 200, { 'Cache-Control': 'public, max-age=3600' }))
+
+app.get('/oauth/callback', async (c) => {
+  const query = new URL(c.req.url).searchParams
+  const state = query.get('state') ?? ''
+  const back = (url?: string) => c.redirect(`/?${new URLSearchParams({ ...(url ? { url } : {}), signin: '1' })}`, 303)
+  if (!state || state !== getCookie(c, COOKIE, 'host')) return back()
+  return back(await finishSignIn(c.env.DB, state, query))
+})
+
+app.post('/api/oauth/claim', async (c) => {
+  const state = getCookie(c, COOKIE, 'host')
+  deleteCookie(c, COOKIE, { path: '/', secure: true, prefix: 'host' })
+  if (!state) return c.json({ ok: false, error: 'signin', message: 'This sign-in expired. Please sign in again.' }, 400, { 'Cache-Control': 'no-store' })
+  const result = await claimSignIn(c.env.DB, state)
+  return result.ok
+    ? c.json(result, 200, { 'Cache-Control': 'no-store' })
+    : c.json({ ok: false, error: 'signin', message: result.message }, 400, { 'Cache-Control': 'no-store' })
 })
 
 app.post('/api/share', async (c) => {

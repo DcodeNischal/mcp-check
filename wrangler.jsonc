@@ -7,7 +7,7 @@
     "binding": "ASSETS",
     // The Vue app; unknown paths fall back to it so client-side routes work.
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/badge/*", "/r/*", "/servers", "/sitemap.xml"]
+    "run_worker_first": ["/api/*", "/badge/*", "/r/*", "/oauth/*", "/servers", "/sitemap.xml"]
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "mcp-check", "database_id": "cda69cf7-7c20-41d2-9238-924f3041040f" }

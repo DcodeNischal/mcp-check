@@ -38,6 +38,12 @@ export interface Receipt {
 export const checkServer = (target: Target, token: string) =>
   post<{ ok: true; report: Report; log: Exchange[]; receipt?: Receipt }>('/api/check', { ...target, token })
 
+/** Start an OAuth sign-in: the browser should go to the returned URL. */
+export const startSignIn = (url: string, token: string) => post<{ ok: true; authorizeUrl: string }>('/api/oauth/start', { url, token })
+
+/** After the sign-in comes back: fetch the access token, once. */
+export const claimSignIn = () => post<{ ok: true; url: string; accessToken: string; expiresIn?: number; scope?: string }>('/api/oauth/claim', {})
+
 export const shareReport = (receipt: Receipt, list: boolean) =>
   post<{ ok: true; id: string; reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean }>('/api/share', { receipt, list })
 

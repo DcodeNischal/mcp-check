@@ -48,6 +48,20 @@ placeholders, query strings) or have no public URL are skipped, and a server is 
 failed attempts. Every request sends `User-Agent: MCP-Check/0.1 (+https://mcp.nischaldhakal.com.np)`.
 Progress: `GET /api/stats`.
 
+## Sign-in for protected servers
+
+For servers that require OAuth, "Sign in with OAuth" runs the authorization code flow with PKCE (S256)
+against the server's own authorization server, found through its protected resource metadata. MCP Check
+is a public client: where the authorization server supports
+[Client ID Metadata Documents](https://modelcontextprotocol.io/specification/draft/basic/authorization),
+its client id is `https://mcp.nischaldhakal.com.np/oauth/client.json`; otherwise it registers through
+Dynamic Client Registration (once per authorization server). Servers that need an app registered by
+hand can still be checked by pasting a token.
+
+The sign-in is tied to the browser that started it with a cookie. After the callback, the Worker holds
+the access token only until the page claims it (once, within ten minutes), then deletes it. The token
+then lives only in that browser tab, and reports made while signed in are never listed.
+
 ## Search
 
 Directory search combines two rankings with reciprocal rank fusion:
@@ -92,7 +106,7 @@ npm run build
 - [x] Public directory with server pages and weekly re-checks
 - [x] Automatic import from the official MCP Registry
 - [x] Hybrid search: keywords and meaning
-- [ ] OAuth sign-in to inspect protected servers
+- [x] OAuth sign-in to inspect protected servers
 - [ ] `npx mcp-check` CLI and GitHub Action
 - [ ] Webhook and RSS alerts
 

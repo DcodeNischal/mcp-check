@@ -32,6 +32,8 @@ export interface AuthSummary {
   challenge?: string
   resourceMetadataUrl?: string
   authorizationServers?: string[]
+  /** The resource identifier from the protected resource metadata (RFC 9728). */
+  resource?: string
   issuer?: string
   authorizationEndpoint?: string
   tokenEndpoint?: string
@@ -39,6 +41,7 @@ export interface AuthSummary {
   pkceS256?: boolean
   clientIdMetadataDocuments?: boolean
   dynamicRegistration?: boolean
+  registrationEndpoint?: string
 }
 
 export interface Report {

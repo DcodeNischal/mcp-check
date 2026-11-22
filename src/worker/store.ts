@@ -94,10 +94,40 @@ const MIGRATIONS: string[][] = [
       WHEN old.name IS NOT new.name OR old.registry_name IS NOT new.registry_name OR old.description IS NOT new.description OR old.tools_text IS NOT new.tools_text BEGIN
       UPDATE servers SET embed_stale = 1 WHERE rowid = new.rowid;
     END`,
-    // Index what's already listed. Clearing first makes this safe to run again.
+    // Index what's already listed. Clearing first makes this safe to run again (see MIGRATIONS[2]).
     `DELETE FROM server_search`,
     `INSERT INTO server_search (rowid, id, name, description, tools, url)
       SELECT rowid, id, trim(coalesce(name, '') || ' ' || coalesce(registry_name, '')), coalesce(description, ''), coalesce(tools_text, ''), url FROM servers WHERE listed = 1 AND blocked = 0`,
+  ],
+  [
+    // OAuth sign-in: sign-ins in progress (deleted when claimed, or after ten minutes) and the
+    // client ids MCP Check got by registering with authorization servers.
+    `CREATE TABLE IF NOT EXISTS oauth_pending (
+      state TEXT PRIMARY KEY,
+      server_url TEXT NOT NULL,
+      issuer TEXT NOT NULL,
+      token_endpoint TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      client_secret TEXT,
+      auth_method TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      verifier TEXT NOT NULL,
+      resource TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      access_token TEXT,
+      expires_in INTEGER,
+      scope TEXT,
+      error TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS oauth_clients (
+      issuer TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      client_id TEXT NOT NULL,
+      client_secret TEXT,
+      auth_method TEXT NOT NULL,
+      registered_at TEXT NOT NULL,
+      PRIMARY KEY (issuer, redirect_uri)
+    )`,
   ],
 ]
 

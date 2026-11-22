@@ -10,12 +10,21 @@
     </section>
 
     <div class="mt-10 max-w-3xl">
-      <CheckForm :busy="busy" :error="error" @submit="onSubmit" />
+      <CheckForm ref="form" :busy="busy" :error="error" @submit="onSubmit" @signin="onSignIn" />
     </div>
 
     <div v-if="busy" class="mt-12 flex items-center gap-3 text-sm text-silver" role="status" aria-live="polite">
       <span class="h-2 w-2 animate-pulse rounded-full bg-emerald-400" aria-hidden="true"></span>
       Connecting, detecting the spec version, and running the checks…
+    </div>
+
+    <div v-if="result && !busy && needsSignIn" class="mt-12 flex flex-col gap-3 rounded-2xl border border-amber-300/25 bg-amber-300/[0.05] p-5 sm:flex-row sm:items-center sm:justify-between">
+      <p class="text-sm leading-relaxed text-silver">
+        <span class="text-white">This server needs sign-in.</span>
+        <template v-if="canSignIn"> Sign in to grade its tools and try them here. Your token stays in this tab.</template>
+        <template v-else> Its sign-in only works with apps registered by hand, so paste a token under “Sign in, token or custom headers” to grade its tools.</template>
+      </p>
+      <button v-if="canSignIn" type="button" class="shrink-0 rounded-lg bg-white px-4 py-2 text-sm font-medium text-black transition hover:bg-neutral-200 cursor-pointer" @click="form?.signIn()">Sign in with OAuth</button>
     </div>
 
     <ReportView v-if="result && !busy" :report="result.report" :log="result.log" :target="target!">
@@ -27,8 +36,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { ApiError, checkServer, type Exchange, type Receipt, type Report, type Target } from '../api'
+import { computed, onMounted, ref } from 'vue'
+import { ApiError, checkServer, claimSignIn, startSignIn, type Exchange, type Receipt, type Report, type Target } from '../api'
 import CheckForm from '../components/CheckForm.vue'
 import ReportView from '../components/ReportView.vue'
 import ShareBox from '../components/ShareBox.vue'
@@ -37,6 +46,39 @@ const busy = ref(false)
 const error = ref('')
 const target = ref<Target>()
 const result = ref<{ report: Report; log: Exchange[]; receipt?: Receipt }>()
+const form = ref<InstanceType<typeof CheckForm>>()
+
+const needsSignIn = computed(() => !!result.value?.report.auth?.required && !result.value.report.authenticated)
+// MCP Check can sign in when the server has PKCE and lets new clients in without manual setup.
+const canSignIn = computed(() => {
+  const auth = result.value?.report.auth
+  return !!auth?.authorizationEndpoint && !!auth.pkceS256 && !!(auth.clientIdMetadataDocuments || auth.dynamicRegistration)
+})
+
+async function onSignIn(url: string, token: string) {
+  error.value = ''
+  try {
+    const { authorizeUrl } = await startSignIn(url, token)
+    location.assign(authorizeUrl)
+  } catch (err) {
+    error.value = err instanceof ApiError ? err.message : 'Sign-in could not be started. Please try again.'
+  }
+}
+
+// Back from the server's sign-in page: pick up the token and run the check with it.
+onMounted(async () => {
+  const params = new URLSearchParams(location.search)
+  if (params.get('signin') !== '1') return
+  const url = params.get('url')
+  history.replaceState(null, '', url ? `?url=${encodeURIComponent(url)}` : location.pathname)
+  try {
+    const signedIn = await claimSignIn()
+    form.value?.useSignIn(signedIn.url, signedIn.accessToken)
+    await form.value?.submit()
+  } catch (err) {
+    error.value = err instanceof ApiError ? err.message : 'Sign-in could not be completed. Please try again.'
+  }
+})
 
 async function onSubmit(t: Target, token: string) {
   busy.value = true

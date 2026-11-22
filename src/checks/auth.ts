@@ -72,6 +72,7 @@ export async function discoverAuth(wire: Wire, mcpUrl: string, challengeHeader: 
   const servers = Array.isArray(prm?.authorization_servers) ? (prm!.authorization_servers as unknown[]).filter((s): s is string => typeof s === 'string') : []
   if (prm && servers.length) {
     summary.authorizationServers = servers
+    if (typeof prm.resource === 'string' && prm.resource) summary.resource = prm.resource
     if (!summary.scopes && Array.isArray(prm.scopes_supported)) summary.scopes = (prm.scopes_supported as unknown[]).filter((s): s is string => typeof s === 'string')
     checks.push(pass('auth.resource-metadata', 'Protected resource metadata', 3, `Found at ${summary.resourceMetadataUrl}, listing ${servers.length} authorization server${servers.length === 1 ? '' : 's'}.`))
   } else {
@@ -124,6 +125,7 @@ export async function discoverAuth(wire: Wire, mcpUrl: string, challengeHeader: 
   // 5. Client registration.
   summary.clientIdMetadataDocuments = asMeta.client_id_metadata_document_supported === true
   summary.dynamicRegistration = typeof asMeta.registration_endpoint === 'string'
+  if (summary.dynamicRegistration) summary.registrationEndpoint = asMeta.registration_endpoint as string
   if (summary.clientIdMetadataDocuments) {
     checks.push(pass('auth.registration', 'Client registration', 2, 'Supports Client ID Metadata Documents, so any client can sign in without registering first.'))
   } else if (summary.dynamicRegistration) {
