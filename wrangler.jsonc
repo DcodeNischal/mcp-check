@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-check",
+  "main": "./src/worker/index.ts",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    // The Vue app; unknown paths fall back to it so client-side routes work.
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "mcp-check", "database_id": "cda69cf7-7c20-41d2-9238-924f3041040f" }
+  ],
+  // Live checks per visitor: 20 a minute (the period can only be 10 or 60 seconds).
+  "ratelimits": [
+    { "name": "CHECK_LIMITER", "namespace_id": "1001", "simple": { "limit": 20, "period": 60 } }
+  ],
+  "observability": { "enabled": true }
+}
