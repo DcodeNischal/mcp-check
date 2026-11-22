@@ -142,7 +142,7 @@ export interface QueuedServer extends Candidate {
 export async function nextCandidates(db: D1Database, count: number): Promise<QueuedServer[]> {
   await ensureSchema(db)
   const lastHost = (await setting(db, 'last_check_host')) ?? ''
-  const retryBefore = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+  const retryBefore = retryCutoff()
   const { results } = await db
     .prepare(`SELECT r.url, r.id, r.host, r.registry_name, r.title, r.description, r.version, r.repository_url, r.website_url, r.attempts
               FROM registry r LEFT JOIN servers s ON s.id = r.id
@@ -170,12 +170,23 @@ export function pickHosts<T extends { host: string }>(rows: T[], lastHost: strin
   return picked
 }
 
-/** Mark the attempt before checking, so a run that gets cut off doesn't block the queue. */
-export async function startAttempt(db: D1Database, c: QueuedServer): Promise<void> {
-  await db.batch([
-    db.prepare(`UPDATE registry SET attempts = attempts + 1, last_attempt_at = ?2 WHERE url = ?1`).bind(c.url, new Date().toISOString()),
-    putSetting(db, 'last_check_host', c.host),
-  ])
+/** A failed attempt can be retried after an hour. */
+const retryCutoff = () => new Date(Date.now() - 60 * 60 * 1000).toISOString()
+
+/**
+ * Claim a server before checking it. Several cron runs check servers at the same time, so the
+ * claim only succeeds if no other run has claimed it since it was picked. Marking the attempt
+ * first also means a run that gets cut off doesn't block the queue.
+ */
+export async function claimAttempt(db: D1Database, c: QueuedServer): Promise<boolean> {
+  const { meta } = await db
+    .prepare(`UPDATE registry SET attempts = attempts + 1, last_attempt_at = ?2
+              WHERE url = ?1 AND status = 'pending' AND (last_attempt_at IS NULL OR last_attempt_at < ?3)`)
+    .bind(c.url, new Date().toISOString(), retryCutoff())
+    .run()
+  if (!meta.changes) return false
+  await putSetting(db, 'last_check_host', c.host).run()
+  return true
 }
 
 /** Checked and listed, or given up after three failed attempts. */

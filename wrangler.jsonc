@@ -21,7 +21,9 @@
   ],
   // Turnstile tokens must come from this hostname. The secret is a Worker secret (TURNSTILE_SECRET).
   "vars": { "TURNSTILE_HOSTNAMES": "mcp.nischaldhakal.com.np" },
-  // One small job a minute: registry sync, checking new servers, or weekly re-checks (see tick in src/worker/index.ts).
-  "triggers": { "crons": ["* * * * *"] },
+  // Four runs a minute, one job each (see tick in src/worker/index.ts). They're the same schedule
+  // written four ways, because each trigger needs a distinct expression. The free plan allows five
+  // cron triggers per account; the website uses the fifth.
+  "triggers": { "crons": ["* * * * *", "*/1 * * * *", "0-59 * * * *", "0-59/1 * * * *"] },
   "observability": { "enabled": true }
 }

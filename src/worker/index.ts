@@ -6,7 +6,7 @@ import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
-import { finishAttempt, nextCandidates, registryStats, startAttempt, syncDue, syncStep, type QueuedServer } from './registry'
+import { claimAttempt, finishAttempt, nextCandidates, registryStats, syncDue, syncStep, type QueuedServer } from './registry'
 import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
 import { checkTarget } from '../security/target'
@@ -297,13 +297,20 @@ async function withMeta(env: Env, requestUrl: string, m: { title: string; descri
   return new Response(rewritten.body, { status: 200, headers })
 }
 
-// Every minute, one main job, so each run stays inside the free plan's 10 ms of CPU:
-// - first, search upkeep (tool text for older reports, embeddings for changed servers);
-// - while a registry sync is in progress, even minutes read one page of the registry and odd
-//   minutes check one queued server, so servers get listed while the sync is still going;
-// - otherwise check one queued server and list it if it responds;
-// - when the queue is empty, re-check one listed server whose report is over a week old.
-async function tick(env: Env, scheduledTime = Date.now()) {
+// Four cron triggers fire every minute, each its own run with its own CPU budget (the free plan
+// allows five per account). Each run does one job:
+// - the main trigger does search upkeep (tool text for older reports, embeddings for changed
+//   servers), then: while a registry sync is in progress, even minutes read one page of the
+//   registry and odd minutes check one queued server; otherwise it checks one queued server; and
+//   when the queue is empty, it re-checks one listed server whose report is over a week old;
+// - the other triggers each check one queued server, so the queue empties four times faster.
+export const MAIN_CRON = '* * * * *'
+
+async function tick(env: Env, scheduledTime = Date.now(), cron = MAIN_CRON) {
+  if (cron !== MAIN_CRON) {
+    await checkNext(env)
+    return
+  }
   // Search upkeep first. Both are cheap and finish quickly once the indexes are current.
   if (await backfillToolsText(env.DB)) return
   await embedPending(env).then(
@@ -311,21 +318,31 @@ async function tick(env: Env, scheduledTime = Date.now()) {
     (err) => console.error('embedding failed', String(err)),
   )
   const syncing = await syncDue(env.DB)
-  const [candidate] = await nextCandidates(env.DB, 1)
   const evenMinute = Math.floor(scheduledTime / 60_000) % 2 === 0
-  if (syncing && (evenMinute || !candidate)) {
+  if (syncing && evenMinute) {
     console.log('registry sync', await syncStep(env.DB))
     return
   }
-  if (candidate) {
-    await checkQueued(env, candidate)
+  if (await checkNext(env)) return
+  if (syncing) {
+    console.log('registry sync', await syncStep(env.DB))
     return
   }
   await recheck(env)
 }
 
+/** Check the next queued server that no other run has claimed. False when the queue is empty. */
+async function checkNext(env: Env): Promise<boolean> {
+  for (const candidate of await nextCandidates(env.DB, 4)) {
+    if (await claimAttempt(env.DB, candidate)) {
+      await checkQueued(env, candidate)
+      return true
+    }
+  }
+  return false
+}
+
 async function checkQueued(env: Env, candidate: QueuedServer) {
-  await startAttempt(env.DB, candidate)
   const report = await runCheck(candidate.url, { vantage: VANTAGE })
   const ok = report.connected || !!report.auth
   if (ok) {
@@ -369,6 +386,6 @@ function trimLog(log: Exchange[]): Exchange[] {
 export default {
   fetch: app.fetch,
   async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
-    ctx.waitUntil(tick(env, controller.scheduledTime).catch((err) => console.error('tick failed', String(err))))
+    ctx.waitUntil(tick(env, controller.scheduledTime, controller.cron).catch((err) => console.error('tick failed', String(err))))
   },
 } satisfies ExportedHandler<Env>
