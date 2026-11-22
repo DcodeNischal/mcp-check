@@ -1,0 +1,36 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run build:cli
+      # The command line and the action are committed as bundles; make sure they match the source.
+      - name: Bundles are up to date
+        run: git diff --exit-code -- cli/bin action || (echo "Run npm run build:cli and commit the result." && exit 1)
+      - run: npm test
+      - run: npm run build
+
+  # The action itself, checking a small MCP server started in the job.
+  action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start an example server
+        run: node test/example-server.mjs 3000 &
+      - id: check
+        uses: ./
+        with:
+          url: http://localhost:3000/mcp
+          min-grade: C
+      - run: echo "Grade ${{ steps.check.outputs.grade }} (${{ steps.check.outputs.score }}/100), passed=${{ steps.check.outputs.passed }}"

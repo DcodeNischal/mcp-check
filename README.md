@@ -3,7 +3,8 @@
 Check, grade and explore any remote [Model Context Protocol](https://modelcontextprotocol.io) server, for free.
 Paste a URL and get an A–F report on protocol compliance, tool quality, OAuth setup, security and speed.
 
-Live at **[mcp.nischaldhakal.com.np](https://mcp.nischaldhakal.com.np)** (coming soon). Built by
+Live at **[mcp.nischaldhakal.com.np](https://mcp.nischaldhakal.com.np)**, in your terminal with
+`npx mcpcheck <url>`, and in CI as a [GitHub Action](#github-action). Built by
 [Nischal Dhakal](https://nischaldhakal.com.np).
 
 ## What it checks
@@ -86,6 +87,46 @@ npx wrangler vectorize create mcp-servers --dimensions=384 --metric=cosine
 Without them, or if either fails or runs out of free quota, search uses keywords only. Searches are
 cached at the edge for a minute.
 
+## Command line
+
+```bash
+npx mcpcheck https://mcp.example.com/mcp
+npx mcpcheck http://localhost:3000/mcp --min-grade B     # fail (exit 1) below a B
+MCP_CHECK_TOKEN=... npx mcpcheck https://mcp.example.com/mcp --markdown
+```
+
+The same checks as the website, run from your machine, so servers on `localhost` and plain `http` work
+too. Options: `-H "Name: value"`, `--token`, `--min-grade`, `--min-score`, `--json`, `--markdown`,
+`-v`, `--timeout`, `--no-color`. Exit codes: `0` passed, `1` below the minimum, `2` unreachable or bad
+usage. See [cli/README.md](cli/README.md).
+
+## GitHub Action
+
+```yaml
+name: MCP server
+on: [push, pull_request]
+jobs:
+  grade:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm start &
+      - uses: DcodeNischal/mcp-check@v1
+        with:
+          url: http://localhost:3000/mcp
+          min-grade: B
+          # token: ${{ secrets.MCP_TOKEN }}
+          # headers: |
+          #   X-Api-Key: ${{ secrets.API_KEY }}
+```
+
+It prints the report, adds a summary to the job, annotates failed checks, and fails the step below
+`min-grade` or `min-score`. Outputs: `grade`, `score`, `passed`, and `report` (a path to the JSON
+report). Token and header values are masked in the log.
+
+The command line and the action are bundled into `cli/bin/mcp-check.mjs` and `action/index.mjs` with
+`npm run build:cli`; both are committed so neither needs an install. CI checks they're up to date.
+
 ## Develop
 
 ```bash
@@ -107,7 +148,7 @@ npm run build
 - [x] Automatic import from the official MCP Registry
 - [x] Hybrid search: keywords and meaning
 - [x] OAuth sign-in to inspect protected servers
-- [ ] `npx mcp-check` CLI and GitHub Action
+- [x] `npx mcpcheck` command line and GitHub Action
 - [ ] Webhook and RSS alerts
 
 ## License

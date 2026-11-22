@@ -11,6 +11,10 @@
 
     <div class="mt-10 max-w-3xl">
       <CheckForm ref="form" :busy="busy" :error="error" @submit="onSubmit" @signin="onSignIn" />
+      <p v-if="!result && !busy" class="mt-6 text-xs text-silver">
+        Also in your terminal: <code class="font-mono text-white/80">npx mcpcheck &lt;url&gt;</code>, and in CI as a
+        <a href="https://github.com/DcodeNischal/mcp-check#github-action" target="_blank" rel="noopener" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">GitHub Action</a>.
+      </p>
     </div>
 
     <div v-if="busy" class="mt-12 flex items-center gap-3 text-sm text-silver" role="status" aria-live="polite">

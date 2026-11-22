@@ -124,7 +124,13 @@ function finish(report: Report, checks: CheckResult[], started: number): Report 
 
 // --- protocol ------------------------------------------------------------------------------
 
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]'])
+
 function httpsCheck(url: URL): CheckResult {
+  // A server on this machine (the command line, in CI) isn't expected to have a certificate.
+  if (url.protocol === 'http:' && LOOPBACK.has(url.hostname)) {
+    return { id: 'security.https', category: 'security', title: 'Served over HTTPS', status: 'info', weight: 0, detail: 'Not checked: the server is on this machine. Serve it over HTTPS when you deploy it.' }
+  }
   return url.protocol === 'https:'
     ? { id: 'security.https', category: 'security', title: 'Served over HTTPS', status: 'pass', weight: 3, detail: 'The endpoint uses HTTPS.' }
     : { id: 'security.https', category: 'security', title: 'Served over HTTPS', status: 'fail', weight: 3, detail: 'The endpoint uses plain HTTP, so tokens and tool data travel unencrypted.', fix: 'Serve the MCP endpoint over HTTPS.' }

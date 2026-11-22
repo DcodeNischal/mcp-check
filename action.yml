@@ -1,0 +1,42 @@
+name: MCP Check
+description: Grade an MCP server against the current spec, and fail the build below a minimum grade.
+author: Nischal Dhakal
+branding:
+  icon: check-circle
+  color: green
+inputs:
+  url:
+    description: The MCP server URL. Servers on localhost (started earlier in the job) work too.
+    required: true
+  min-grade:
+    description: Fail the step if the grade is below this (A, B, C, D or F). Leave empty to never fail on the grade.
+    required: false
+    default: ''
+  min-score:
+    description: Fail the step if the score (0-100) is below this.
+    required: false
+    default: ''
+  token:
+    description: A bearer token for servers that require sign-in. Use a secret.
+    required: false
+    default: ''
+  headers:
+    description: Extra headers, one "Name: value" per line. Values are masked in the log.
+    required: false
+    default: ''
+  timeout:
+    description: Time limit per request, in seconds.
+    required: false
+    default: '15'
+outputs:
+  grade:
+    description: The grade, A to F (empty if the server couldn't be reached).
+  score:
+    description: The score, 0 to 100 (empty if the server couldn't be reached).
+  passed:
+    description: '"true" if the server met the minimum grade and score.'
+  report:
+    description: Path to the full report as JSON.
+runs:
+  using: node24
+  main: action/index.mjs
