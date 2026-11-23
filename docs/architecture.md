@@ -45,6 +45,12 @@ One cron trigger fires every minute. Each run:
 The queries that run every minute or on every directory view all have matching indexes, so each reads a
 handful of rows; the free plan allows 5 million rows read a day.
 
+Writes are the tighter limit: 100,000 rows a day, and past that every write fails until midnight UTC.
+A newly listed server costs a few dozen row writes (its row and indexes, the search index, a feed event),
+so background checks (steps 3 and 4) stop for the day after 2,000 (`DAILY_CHECK_BUDGET` in
+`src/worker/budget.ts`). The registry sync and the search index only write what actually changed, so a
+daily sync of an unchanged registry costs almost nothing.
+
 ## Registry import
 
 Servers in the registry with a public Streamable HTTP or SSE URL are queued, checked, and listed if they

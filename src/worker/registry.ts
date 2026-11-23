@@ -152,10 +152,13 @@ async function syncPage(db: D1Database, fetchImpl: typeof fetch): Promise<{ adde
     statements.push(
       db.prepare(`INSERT INTO registry (url, id, host, registry_name, title, description, version, repository_url, website_url, first_seen_at, last_seen_at)
                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
-                  ON CONFLICT (url) DO UPDATE SET registry_name = ?4, title = ?5, description = ?6, version = ?7, repository_url = ?8, website_url = ?9, last_seen_at = ?10`)
+                  ON CONFLICT (url) DO UPDATE SET registry_name = ?4, title = ?5, description = ?6, version = ?7, repository_url = ?8, website_url = ?9, last_seen_at = ?10
+                  WHERE registry.registry_name IS NOT ?4 OR registry.title IS NOT ?5 OR registry.description IS NOT ?6 OR registry.version IS NOT ?7
+                     OR registry.repository_url IS NOT ?8 OR registry.website_url IS NOT ?9`)
         .bind(c.url, id, c.host, c.registryName, c.title, c.description, c.version, c.repositoryUrl, c.websiteUrl, now),
       // Keep the details on already-listed servers current too.
-      db.prepare(`UPDATE servers SET registry_name = ?2, description = ?3, repository_url = ?4, website_url = ?5 WHERE id = ?1`)
+      db.prepare(`UPDATE servers SET registry_name = ?2, description = ?3, repository_url = ?4, website_url = ?5
+                  WHERE id = ?1 AND (registry_name IS NOT ?2 OR description IS NOT ?3 OR repository_url IS NOT ?4 OR website_url IS NOT ?5)`)
         .bind(id, c.registryName, c.description, c.repositoryUrl, c.websiteUrl),
     )
   }
@@ -163,7 +166,9 @@ async function syncPage(db: D1Database, fetchImpl: typeof fetch): Promise<{ adde
     statements.push(
       db.prepare(`INSERT INTO keyed_servers (registry_name, url, reason, title, description, repository_url, website_url, first_seen_at, last_seen_at)
                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
-                  ON CONFLICT (registry_name) DO UPDATE SET url = ?2, reason = ?3, title = ?4, description = ?5, repository_url = ?6, website_url = ?7, last_seen_at = ?8`)
+                  ON CONFLICT (registry_name) DO UPDATE SET url = ?2, reason = ?3, title = ?4, description = ?5, repository_url = ?6, website_url = ?7, last_seen_at = ?8
+                  WHERE keyed_servers.url IS NOT ?2 OR keyed_servers.reason IS NOT ?3 OR keyed_servers.title IS NOT ?4 OR keyed_servers.description IS NOT ?5
+                     OR keyed_servers.repository_url IS NOT ?6 OR keyed_servers.website_url IS NOT ?7`)
         .bind(k.registryName, k.url, k.reason, k.title, k.description, k.repositoryUrl, k.websiteUrl, now),
     )
   }
@@ -185,7 +190,7 @@ export interface QueuedServer extends Candidate {
  */
 export async function nextCandidates(db: D1Database, count: number): Promise<QueuedServer[]> {
   await ensureSchema(db)
-  const lastHost = (await setting(db, 'last_check_host')) ?? ''
+  const lastHost = ''
   const retryBefore = retryCutoff()
   const { results } = await db
     .prepare(`SELECT r.url, r.id, r.host, r.registry_name, r.title, r.description, r.version, r.repository_url, r.website_url, r.attempts
@@ -228,9 +233,7 @@ export async function claimAttempt(db: D1Database, c: QueuedServer): Promise<boo
               WHERE url = ?1 AND status = 'pending' AND (last_attempt_at IS NULL OR last_attempt_at < ?3)`)
     .bind(c.url, new Date().toISOString(), retryCutoff())
     .run()
-  if (!meta.changes) return false
-  await putSetting(db, 'last_check_host', c.host).run()
-  return true
+  return meta.changes > 0
 }
 
 /** Checked and listed, or given up after three failed attempts. */

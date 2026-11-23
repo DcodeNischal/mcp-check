@@ -11,6 +11,7 @@ import { hasProof, markVerified, proofUrl, reconfirmOwner, type ProofAction } fr
 import { handleMcp, OWN_MCP_URL, OWN_ORIGIN, ownProofText } from './mcp-server'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
 import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, type QueuedServer } from './registry'
+import { checksLeftToday, countCheck } from './budget'
 import { refreshStatsIfDue, storedStats } from './stats'
 import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
@@ -391,6 +392,7 @@ async function withMeta(env: Env, requestUrl: string, m: { title: string; descri
 // 3. checks up to CHECKERS queued servers at once, each through the Checker entrypoint, so every
 //    check is its own invocation with its own CPU budget (one run alone has 10 ms on the free plan);
 // 4. when the queue is empty, re-checks one listed server whose report is over a week old.
+// Steps 3 and 4 stop for the day once the daily check budget is spent (see budget.ts).
 const CHECKERS = 4
 
 async function tick(env: Env) {
@@ -415,11 +417,14 @@ async function tick(env: Env) {
   }
   // Webhook deliveries, in their own invocation.
   const alerts = env.CHECKER ? env.CHECKER.deliverAlerts() : deliverPending(env.DB, SITE_ORIGIN)
-  // Without the binding (tests, misconfiguration), check one server in this run instead.
-  const checker = env.CHECKER
-  const runs = checker ? Array.from({ length: CHECKERS }, () => checker.checkNext()) : [checkNext(env)]
-  const checked = await Promise.all(runs.map((r) => Promise.resolve(r).catch((err) => (console.error('checker failed', String(err)), false))))
-  if (!checked.some(Boolean)) await recheck(env)
+  const left = await checksLeftToday(env.DB)
+  if (left > 0) {
+    // Without the binding (tests, misconfiguration), check one server in this run instead.
+    const checker = env.CHECKER
+    const runs = checker ? Array.from({ length: Math.min(CHECKERS, left) }, () => checker.checkNext()) : [checkNext(env)]
+    const checked = await Promise.all(runs.map((r) => Promise.resolve(r).catch((err) => (console.error('checker failed', String(err)), false))))
+    if (!checked.some(Boolean)) await recheck(env)
+  }
   await Promise.resolve(alerts).then(
     (n) => n && console.log('alerts delivered', n),
     (err) => console.error('alerts failed', String(err)),
@@ -466,6 +471,7 @@ export class Checker extends WorkerEntrypoint<Env> {
 async function checkNext(env: Env): Promise<boolean> {
   for (const candidate of await nextCandidates(env.DB, 4)) {
     if (await claimAttempt(env.DB, candidate)) {
+      await countCheck(env.DB)
       await checkQueued(env, candidate)
       return true
     }
@@ -491,6 +497,7 @@ async function recheck(env: Env) {
   const now = Date.now()
   const due = await dueForRecheck(env.DB, new Date(now - 7 * 86_400_000).toISOString(), new Date(now - 86_400_000).toISOString(), 1)
   for (const server of due) {
+    await countCheck(env.DB)
     const report = await runCheck(server.url, { vantage: VANTAGE, fetch: checkFetch(env) })
     if (report.connected || report.auth) await saveReport(env.DB, server.id, server.url, report)
     else await recordFailure(env.DB, server.id)

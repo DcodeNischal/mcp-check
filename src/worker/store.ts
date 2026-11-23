@@ -220,6 +220,19 @@ const MIGRATIONS: string[][] = [
       last_seen_at TEXT NOT NULL
     )`,
   ],
+  [
+    // Fewer row writes (the free plan allows 100,000 a day): rebuild a server's search entry only
+    // when something it indexes actually changes, and drop indexes newer ones replaced.
+    `DROP TRIGGER IF EXISTS servers_search_update`,
+    `CREATE TRIGGER servers_search_update AFTER UPDATE OF name, registry_name, description, tools_text, url, listed, blocked ON servers
+      WHEN old.name IS NOT new.name OR old.registry_name IS NOT new.registry_name OR old.description IS NOT new.description
+        OR old.tools_text IS NOT new.tools_text OR old.url IS NOT new.url OR old.listed IS NOT new.listed OR old.blocked IS NOT new.blocked BEGIN
+      DELETE FROM server_search WHERE rowid = old.rowid;
+      INSERT INTO server_search (rowid, id, name, description, tools, url) SELECT new.rowid, new.id, trim(coalesce(new.name, '') || ' ' || coalesce(new.registry_name, '')), coalesce(new.description, ''), coalesce(new.tools_text, ''), new.url WHERE new.listed = 1 AND new.blocked = 0;
+    END`,
+    `DROP INDEX IF EXISTS registry_pending`,
+    `DROP INDEX IF EXISTS servers_listed_grade`,
+  ],
 ]
 
 async function migrate(db: D1Database) {
@@ -320,12 +333,16 @@ export async function saveReport(db: D1Database, id: string, url: string, report
   // Listing rules: never list a report made with someone's credentials (its tool list may be
   // private), never re-list a server its owner removed, and keep an existing listing on re-share.
   const row = await db
-    .prepare(`INSERT INTO servers (id, url, name, version, grade, score, era, spec_version, tools_count, partial, auth_required, authenticated, report, checked_at, created_at, updated_at, last_attempt_at, listed, failures, tools_text, issues, grading_version)
-              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15, CASE WHEN ?16 = 1 AND ?12 = 0 THEN 1 ELSE 0 END, 0, ?17, ?18, ?19)
+    .prepare(`INSERT INTO servers (id, url, name, version, grade, score, era, spec_version, tools_count, partial, auth_required, authenticated, report, checked_at, created_at, updated_at, last_attempt_at, listed, failures, tools_text, issues, grading_version, registry_name, description, repository_url, website_url)
+              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15, CASE WHEN ?16 = 1 AND ?12 = 0 THEN 1 ELSE 0 END, 0, ?17, ?18, ?19, ?21, ?22, ?23, ?24)
               ON CONFLICT (id) DO UPDATE SET name = ?3, version = ?4, grade = ?5, score = ?6, era = ?7, spec_version = ?8,
                 tools_count = ?9, partial = ?10, auth_required = ?11, authenticated = ?12, report = ?13, checked_at = ?14, updated_at = ?15, tools_text = ?17, issues = ?18, grading_version = ?19,
                 last_attempt_at = ?15, failures = 0,
-                listed = CASE WHEN servers.blocked = 1 OR ?12 = 1 THEN 0 WHEN ?16 = 1 THEN 1 ELSE servers.listed END
+                listed = CASE WHEN servers.blocked = 1 OR ?12 = 1 THEN 0 WHEN ?16 = 1 THEN 1 ELSE servers.listed END,
+                registry_name = CASE WHEN ?20 = 1 THEN ?21 ELSE servers.registry_name END,
+                description = CASE WHEN ?20 = 1 THEN ?22 ELSE servers.description END,
+                repository_url = CASE WHEN ?20 = 1 THEN ?23 ELSE servers.repository_url END,
+                website_url = CASE WHEN ?20 = 1 THEN ?24 ELSE servers.website_url END
               RETURNING listed, blocked`)
     .bind(
       id, url,
@@ -334,14 +351,9 @@ export async function saveReport(db: D1Database, id: string, url: string, report
       report.grade, report.score, report.era ?? null, report.version ?? null,
       report.tools.length, report.partial ? 1 : 0, report.auth?.required ? 1 : 0, report.authenticated ? 1 : 0,
       blob, report.checkedAt, now, opts.list ? 1 : 0, toolsText(report.tools), issuesOf(report), report.gradingVersion ?? 1,
+      opts.registry ? 1 : 0, opts.registry?.registryName ?? null, opts.registry?.description ?? null, opts.registry?.repositoryUrl ?? null, opts.registry?.websiteUrl ?? null,
     )
     .first<{ listed: number; blocked: number }>()
-  if (opts.registry) {
-    await db
-      .prepare(`UPDATE servers SET registry_name = ?2, description = ?3, repository_url = ?4, website_url = ?5 WHERE id = ?1`)
-      .bind(id, opts.registry.registryName, opts.registry.description, opts.registry.repositoryUrl, opts.registry.websiteUrl)
-      .run()
-  }
   return { listed: !!row?.listed, blocked: !!row?.blocked }
 }
 
