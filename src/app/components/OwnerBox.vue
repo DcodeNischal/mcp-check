@@ -37,9 +37,10 @@
         <a :href="nexus402('verified_owner')" target="_blank" rel="noopener" class="mt-3 inline-block rounded-lg bg-white px-3 py-1.5 text-sm text-black">Join the Nexus402 launch list</a>
       </div>
       <p v-else>
-        Want to charge for your tools?
-        <a :href="nexus402('owner_section')" target="_blank" rel="noopener" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">Nexus402</a>
-        is a clearinghouse for paid MCP tools, opening soon.
+        Want to charge for your tools? Here's
+        <a href="https://nischaldhakal.com.np/blog/how-to-charge-for-an-mcp-tool" target="_blank" rel="noopener" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">how to charge for an MCP tool</a>,
+        including <a :href="nexus402('owner_section')" target="_blank" rel="noopener" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">Nexus402</a>,
+        a clearinghouse for paid MCP tools opening soon.
       </p>
     </div>
   </details>
