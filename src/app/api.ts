@@ -92,7 +92,9 @@ export interface DirectoryEntry {
 export async function listServers(params: { q?: string; grade?: string; sort?: string; page?: number }) {
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== '') qs.set(k, String(v))
-  const res = await fetch(`/api/servers?${qs}`, { headers: { Accept: 'application/json' } })
+  // Skip the browser's cache: Cloudflare's zone settings can stretch it to hours, which hid new grades
+  // and verified marks. The API's own edge cache still answers repeat requests for a minute.
+  const res = await fetch(`/api/servers?${qs}`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
   const data = (await res.json().catch(() => null)) as { servers?: DirectoryEntry[]; total?: number; pageSize?: number } | null
   if (!res.ok || !data?.servers) throw new ApiError('The directory could not be loaded.', 'server')
   return { servers: data.servers, total: data.total ?? 0, pageSize: data.pageSize ?? 30 }
