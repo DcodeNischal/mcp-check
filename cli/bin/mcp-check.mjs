@@ -1339,7 +1339,7 @@ function renderMarkdown(report, v) {
 async function main() {
   const parsed = parseArgs(process.argv.slice(2), process.env);
   if (parsed.kind === "help") return print(USAGE, 0);
-  if (parsed.kind === "version") return print("0.1.1", 0);
+  if (parsed.kind === "version") return print("0.1.2", 0);
   if (parsed.kind === "error") return print(`${parsed.message}
 
 ${USAGE}`, 2, true);
