@@ -51,7 +51,7 @@
           <span class="min-w-0 flex-1">
             <span class="flex min-w-0 items-center gap-2 text-sm text-white">
               <span class="truncate">{{ s.name || hostOf(s.url) }}</span>
-              <span v-if="s.owner_verified_at" class="shrink-0 text-xs text-emerald-300" title="The owner proved control of the domain">✓<span class="sr-only"> Verified owner</span></span>
+              <VerifiedTick v-if="s.owner_verified_at" :size="15" title="Verified owner: they proved control of the domain" />
             </span>
             <span class="block truncate font-mono text-xs text-silver">{{ s.url }}</span>
             <span v-if="s.description" class="mt-1 block truncate text-xs text-silver/80">{{ s.description }}</span>
@@ -78,6 +78,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { listServers, type DirectoryEntry } from '../api'
+import VerifiedTick from '../components/VerifiedTick.vue'
 
 const route = useRoute()
 const router = useRouter()

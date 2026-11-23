@@ -13,7 +13,7 @@
     <template v-else-if="report">
       <p class="flex flex-wrap items-center gap-x-3 gap-y-2 font-mono text-[11px] uppercase tracking-[0.3em] text-silver">
         <span>{{ registry ? 'Directory' : 'Shared report' }} · checked {{ checkedAgo }}</span>
-        <span v-if="verifiedAt" class="rounded-full bg-emerald-400/10 px-2.5 py-1 normal-case tracking-normal text-emerald-300" :title="`The owner proved control of the domain on ${verifiedAt.slice(0, 10)}`">✓ Verified owner</span>
+        <span v-if="verifiedAt" class="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-1 normal-case tracking-normal text-white" :title="`The owner proved control of the domain on ${verifiedAt.slice(0, 10)}`"><VerifiedTick :size="14" title="" />Verified owner</span>
       </p>
       <div v-if="registry" class="mt-4 max-w-3xl">
         <p v-if="registry.description" class="text-base leading-relaxed text-silver">{{ registry.description }}</p>
@@ -23,7 +23,7 @@
           <span>In the <a href="https://registry.modelcontextprotocol.io" target="_blank" rel="noopener" class="underline decoration-white/30 underline-offset-4 hover:text-white">MCP Registry</a> as <code class="font-mono text-white/80">{{ registry.name }}</code></span>
         </p>
       </div>
-      <ReportView :report="report" :target="{ url: report.url, headers: {} }">
+      <ReportView :report="report" :target="{ url: report.url, headers: {} }" :verified="!!verifiedAt">
         <template #actions>
           <div class="flex flex-wrap items-center gap-3">
             <RouterLink :to="{ path: '/', query: { url: report.url } }" class="rounded-lg bg-white px-4 py-2 text-sm text-black">Check again</RouterLink>
@@ -44,6 +44,7 @@ import { useRoute } from 'vue-router'
 import { getReport, type RegistryInfo, type Report } from '../api'
 import AlertsBox from '../components/AlertsBox.vue'
 import OwnerBox from '../components/OwnerBox.vue'
+import VerifiedTick from '../components/VerifiedTick.vue'
 import ReportView from '../components/ReportView.vue'
 
 const route = useRoute()

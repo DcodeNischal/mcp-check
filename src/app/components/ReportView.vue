@@ -7,6 +7,7 @@
         <div class="min-w-0">
           <h2 id="report-title" class="text-2xl font-light tracking-tight break-words">
             {{ report.serverInfo?.title || report.serverInfo?.name || hostname }}
+            <VerifiedTick v-if="verified" :size="20" class="ml-1 -mt-1" />
             <span v-if="report.serverInfo?.version" class="ml-1 font-mono text-sm text-silver">{{ report.serverInfo.version }}</span>
           </h2>
           <p class="mt-1 font-mono text-xs text-silver break-all">{{ report.url }}</p>
@@ -83,12 +84,13 @@
 </template>
 
 <script setup lang="ts">
+import VerifiedTick from './VerifiedTick.vue'
 import { computed, ref } from 'vue'
 import type { Exchange, Report, Target } from '../api'
 import RawLog from './RawLog.vue'
 import ToolsPanel from './ToolsPanel.vue'
 
-const props = withDefaults(defineProps<{ report: Report; log?: Exchange[]; target: Target }>(), { log: () => [] })
+const props = withDefaults(defineProps<{ report: Report; log?: Exchange[]; target: Target; verified?: boolean }>(), { log: () => [], verified: false })
 const tab = ref<'checks' | 'tools' | 'more' | 'log'>('checks')
 
 const hostname = computed(() => {
