@@ -1,24 +1,25 @@
 <template>
-  <details class="mt-4 text-xs text-silver" :open="justVerified">
-    <summary class="cursor-pointer hover:text-white">Own this server? Verify it, or remove it from the directory</summary>
+  <details class="mt-4 text-xs text-silver" :open="justVerified || blocked">
+    <summary class="cursor-pointer hover:text-white">{{ blocked ? 'Own this server? List it again' : 'Own this server? Verify it, or remove it from the directory' }}</summary>
     <div class="mt-3 space-y-4 rounded-xl border border-white/10 bg-white/[0.02] p-4 leading-relaxed">
       <p>
         Prove you control the domain by serving a line of text at
         <code class="font-mono text-white/90 break-all">{{ proofUrl }}</code>, then press the button below it.
       </p>
 
-      <div class="grid gap-4 sm:grid-cols-2">
+      <p v-if="blocked" class="text-amber-300">Its owner removed this server from the directory. Verifying ownership lists it again.</p>
+      <div class="grid gap-4" :class="blocked ? '' : 'sm:grid-cols-2'">
         <div class="space-y-2">
           <p class="text-white">Verify ownership</p>
-          <p>Your server's page shows a verified-owner mark for as long as the line stays up (it's checked at every weekly re-check).</p>
+          <p>Your server's page shows a verified-owner mark for as long as the line stays up (it's checked at every weekly re-check).<template v-if="!blocked"> If you removed the server, verifying lists it again.</template></p>
           <pre class="overflow-x-auto rounded bg-black/40 p-3 font-mono text-white/90">mcp-check: verify {{ id }}</pre>
           <button type="button" :disabled="busy !== ''" class="rounded-lg border border-white/15 px-3 py-1.5 text-white hover:bg-white/5 disabled:opacity-50 cursor-pointer" @click="run('verify')">
             {{ busy === 'verify' ? 'Checking…' : 'Verify' }}
           </button>
         </div>
-        <div class="space-y-2">
+        <div v-if="!blocked" class="space-y-2">
           <p class="text-white">Remove from the directory</p>
-          <p>The server is taken out of the directory and won't be listed again.</p>
+          <p>The server is taken out of the directory until you verify ownership again.</p>
           <pre class="overflow-x-auto rounded bg-black/40 p-3 font-mono text-white/90">mcp-check: remove {{ id }}</pre>
           <button type="button" :disabled="busy !== ''" class="rounded-lg border border-white/15 px-3 py-1.5 text-white hover:bg-white/5 disabled:opacity-50 cursor-pointer" @click="run('remove')">
             {{ busy === 'remove' ? 'Checking…' : 'Verify and remove' }}
@@ -50,8 +51,8 @@
 import { computed, ref } from 'vue'
 import { ApiError, unlistServer, verifyOwner } from '../api'
 
-const props = defineProps<{ id: string; url: string }>()
-const emit = defineEmits<{ verified: [at: string]; removed: [] }>()
+const props = defineProps<{ id: string; url: string; blocked?: boolean }>()
+const emit = defineEmits<{ verified: [at: string, relisted: boolean]; removed: [] }>()
 const busy = ref<'' | 'verify' | 'remove'>('')
 const message = ref('')
 const ok = ref(false)
@@ -76,7 +77,7 @@ async function run(action: 'verify' | 'remove') {
     if (action === 'verify') {
       const res = await verifyOwner(props.id)
       justVerified.value = true
-      emit('verified', res.verifiedAt)
+      emit('verified', res.verifiedAt, res.relisted)
       message.value = res.message
     } else {
       const res = await unlistServer(props.id)

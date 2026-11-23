@@ -214,20 +214,23 @@ async function ownerAction(c: { req: { header(n: string): string | undefined; js
   return { status: 200 as const, id }
 }
 
-// Removal: the server is unlisted and can't be listed again.
+// Removal: the server is unlisted, and stays unlisted until its owner verifies again.
 app.post('/api/unlist', async (c) => {
   const r = await ownerAction(c, 'remove')
   if (r.status !== 200) return c.json(r.body, r.status)
   await blockServer(c.env.DB, r.id)
-  return c.json({ ok: true, message: 'Removed from the directory. It will not be listed again.' })
+  return c.json({ ok: true, message: "Removed from the directory. To list it again later, serve the verify line and press Verify." })
 })
 
 // Verification: the server page shows a verified-owner badge while the proof stays up.
 app.post('/api/verify', async (c) => {
   const r = await ownerAction(c, 'verify')
   if (r.status !== 200) return c.json(r.body, r.status)
-  const verifiedAt = await markVerified(c.env.DB, r.id)
-  return c.json({ ok: true, verifiedAt, message: "Verified. This server's page now shows you as its owner." })
+  const { at, relisted } = await markVerified(c.env.DB, r.id)
+  const message = relisted
+    ? "Verified, and listed in the directory again. You can take down the remove line if it's still there."
+    : "Verified. This server's page now shows you as its owner."
+  return c.json({ ok: true, verifiedAt: at, relisted, message })
 })
 
 // Progress of the registry import and the directory size.

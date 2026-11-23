@@ -31,7 +31,7 @@
             <RouterLink v-if="listed" to="/servers" class="ml-auto rounded-full bg-emerald-400/10 px-3 py-1 text-xs text-emerald-300">In the public directory</RouterLink>
           </div>
           <AlertsBox v-if="listed" :id="id" />
-          <OwnerBox v-if="listed" :id="id" :url="report.url" @verified="(at) => (verifiedAt = at)" @removed="listed = false" />
+          <OwnerBox v-if="listed || blocked" :id="id" :url="report.url" :blocked="blocked" @verified="onVerified" @removed="onRemoved" />
         </template>
       </ReportView>
     </template>
@@ -54,6 +54,19 @@ const listed = ref(false)
 const registry = ref<RegistryInfo>()
 const id = String(route.params.id)
 const verifiedAt = ref<string>()
+const blocked = ref(false)
+
+function onVerified(at: string, relisted: boolean) {
+  verifiedAt.value = at
+  if (relisted) {
+    listed.value = true
+    blocked.value = false
+  }
+}
+function onRemoved() {
+  listed.value = false
+  blocked.value = true
+}
 
 const checkedAgo = computed(() => {
   if (!report.value) return ''
@@ -68,6 +81,7 @@ onMounted(async () => {
     listed.value = !!found?.listed
     registry.value = found?.registry
     verifiedAt.value = found?.verifiedAt
+    blocked.value = !!found?.blocked
     state.value = report.value ? 'ready' : 'missing'
   } catch {
     state.value = 'error'

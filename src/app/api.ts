@@ -101,7 +101,7 @@ export async function listServers(params: { q?: string; grade?: string; sort?: s
 export const subscribeWebhook = (id: string, url: string, token: string) =>
   post<{ ok: true; id: string; secret: string; format: 'json' | 'slack' | 'discord' }>('/api/webhooks', { id, url, token })
 
-export const verifyOwner = (id: string) => post<{ ok: true; verifiedAt: string; message: string }>('/api/verify', { id })
+export const verifyOwner = (id: string) => post<{ ok: true; verifiedAt: string; relisted: boolean; message: string }>('/api/verify', { id })
 
 export const unlistServer = (id: string) => post<{ ok: true; message: string }>('/api/unlist', { id })
 

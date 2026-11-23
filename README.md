@@ -46,7 +46,8 @@ and pressing the button on its page:
 
 - `mcp-check: verify <id>` shows a verified-owner mark on the server's page and in the directory. It's
   re-confirmed at every weekly re-check and dropped if the line is gone.
-- `mcp-check: remove <id>` takes the server out of the directory; it can't be listed again.
+- `mcp-check: remove <id>` takes the server out of the directory. Verifying again lists it again, so only
+  the domain's owner can remove a server or bring it back.
 
 ## Registry import
 
