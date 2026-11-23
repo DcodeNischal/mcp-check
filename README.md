@@ -1,6 +1,7 @@
 # MCP Check
 
 [![MCP Check](https://mcp.nischaldhakal.com.np/badge/jh878eqit93e.svg)](https://mcp.nischaldhakal.com.np/r/jh878eqit93e)
+[![npm](https://img.shields.io/npm/v/@dcodenischal/mcp-check?label=npm&color=cb3837)](https://www.npmjs.com/package/@dcodenischal/mcp-check)
 
 Check, grade and explore any remote [Model Context Protocol](https://modelcontextprotocol.io) server, for free.
 Paste a URL and get an A–F report on protocol compliance, tool quality, OAuth setup, security and speed.

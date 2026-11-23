@@ -1,5 +1,7 @@
 # @dcodenischal/mcp-check
 
+[![npm](https://img.shields.io/npm/v/@dcodenischal/mcp-check?label=npm&color=cb3837)](https://www.npmjs.com/package/@dcodenischal/mcp-check)
+
 Grade an MCP server against the current spec, from your terminal or CI. The same checks as
 [MCP Check](https://mcp.nischaldhakal.com.np), run from your machine, so servers on `localhost` work too.
 
