@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { OWN_MCP_URL, ownProofText } from '../src/worker/mcp-server'
 import { hasProof, proofMatches, proofUrl } from '../src/worker/owners'
+import { serverId } from '../src/worker/store'
 
 const ID = 'abcdefgh2345'
 
@@ -26,5 +28,13 @@ describe('owner proof', () => {
     let called = false
     await hasProof('https://10.0.0.5/mcp', ID, 'verify', (async () => { called = true; return new Response('') }) as unknown as typeof fetch)
     expect(called).toBe(false)
+  })
+})
+
+describe("MCP Check's own proof file", () => {
+  it('verifies MCP Check as the owner of its own server', async () => {
+    const text = await ownProofText()
+    expect(proofMatches(text, await serverId(OWN_MCP_URL), 'verify')).toBe(true)
+    expect(text).not.toMatch(/remove/)
   })
 })

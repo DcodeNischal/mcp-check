@@ -8,7 +8,7 @@ import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
 import { atomFeed, deliverPending, pruneEvents, recentEvents, subscribe, unsubscribe, WebhookError } from './alerts'
 import { hasProof, markVerified, proofUrl, reconfirmOwner, type ProofAction } from './owners'
-import { handleMcp, OWN_MCP_URL, OWN_ORIGIN } from './mcp-server'
+import { handleMcp, OWN_MCP_URL, OWN_ORIGIN, ownProofText } from './mcp-server'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
 import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, type QueuedServer } from './registry'
 import { refreshStatsIfDue, storedStats } from './stats'
@@ -47,6 +47,9 @@ const VANTAGE = "Cloudflare's network"
 const SITE_ORIGIN = 'https://mcp.nischaldhakal.com.np'
 
 app.get('/api/health', (c) => c.json({ ok: true }))
+
+// MCP Check's ownership proof for its own server, the same file any owner serves (see owners.ts).
+app.get('/.well-known/mcp-check.txt', async (c) => c.text(await ownProofText(), 200, { 'Cache-Control': 'public, max-age=3600' }))
 
 // MCP Check's own MCP server (see src/worker/mcp-server.ts).
 app.all('/mcp', (c) => handleMcp(c.req.raw, { env: c.env, ip: c.req.header('CF-Connecting-IP'), fetch: checkFetch(c.env) }))
@@ -216,6 +219,7 @@ app.get('/api/servers', async (c) => {
 // Owner actions (see src/worker/owners.ts): the server's domain must serve
 // /.well-known/mcp-check.txt containing "mcp-check: verify <id>" or "mcp-check: remove <id>".
 async function ownerAction(c: { req: { header(n: string): string | undefined; json(): Promise<unknown> }; env: Env }, action: ProofAction) {
+  // checkFetch: the proof file may be on this Worker's own domain (MCP Check's own server).
   const ip = c.req.header('CF-Connecting-IP')
   const { success } = await c.env.CHECK_LIMITER.limit({ key: ip ?? 'unknown' })
   if (!success) return { status: 429 as const, body: { ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' } }
@@ -223,7 +227,7 @@ async function ownerAction(c: { req: { header(n: string): string | undefined; js
   const id = typeof body?.id === 'string' ? body.id : ''
   const url = ID.test(id) ? await serverUrl(c.env.DB, id) : undefined
   if (!url) return { status: 404 as const, body: { ok: false, error: 'not-found', message: 'No server with this id.' } }
-  if (!(await hasProof(url, id, action))) {
+  if (!(await hasProof(url, id, action, checkFetch(c.env)))) {
     return { status: 400 as const, body: { ok: false, error: 'unverified', message: `Couldn't find "mcp-check: ${action} ${id}" at ${proofUrl(url)}.` } }
   }
   return { status: 200 as const, id }
@@ -425,7 +429,10 @@ async function tick(env: Env) {
 /** MCP Check's own MCP server is listed (pinned on top) and re-checked once a day. */
 async function checkOwnServer(env: Env) {
   const id = await serverId(OWN_MCP_URL)
-  const last = await env.DB.prepare(`SELECT checked_at FROM servers WHERE id = ?1`).bind(id).first<string>('checked_at')
+  const row = await env.DB.prepare(`SELECT checked_at, owner_verified_at FROM servers WHERE id = ?1`).bind(id).first<{ checked_at: string; owner_verified_at: string | null }>()
+  // Verified the same way as any owner: /.well-known/mcp-check.txt on this domain serves the verify line.
+  if (row && !row.owner_verified_at && (await hasProof(OWN_MCP_URL, id, 'verify', checkFetch(env)))) await markVerified(env.DB, id)
+  const last = row?.checked_at
   if (last && Date.now() - Date.parse(last) < 24 * 60 * 60 * 1000) return
   const report = await runCheck(OWN_MCP_URL, { vantage: VANTAGE, fetch: checkFetch(env) })
   if (!report.connected) return console.error('own server unreachable', report.error)
@@ -433,6 +440,7 @@ async function checkOwnServer(env: Env) {
   await env.DB.prepare(`UPDATE servers SET description = ?2, website_url = ?3, repository_url = ?4 WHERE id = ?1`)
     .bind(id, "MCP Check's own server: check any MCP server against the spec, and search this directory, from your agent.", OWN_ORIGIN, 'https://github.com/DcodeNischal/mcp-check')
     .run()
+  if (await hasProof(OWN_MCP_URL, id, 'verify', checkFetch(env))) await markVerified(env.DB, id)
   console.log('own server', report.grade, report.score)
 }
 
@@ -486,7 +494,7 @@ async function recheck(env: Env) {
     const report = await runCheck(server.url, { vantage: VANTAGE, fetch: checkFetch(env) })
     if (report.connected || report.auth) await saveReport(env.DB, server.id, server.url, report)
     else await recordFailure(env.DB, server.id)
-    await reconfirmOwner(env.DB, server.id, server.url).catch((err) => console.error('owner reconfirm failed', String(err)))
+    await reconfirmOwner(env.DB, server.id, server.url, checkFetch(env)).catch((err) => console.error('owner reconfirm failed', String(err)))
     console.log('recheck', server.id, report.connected || report.auth ? report.grade : 'unreachable')
   }
 }

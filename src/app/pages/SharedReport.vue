@@ -12,7 +12,7 @@
 
     <template v-else-if="report">
       <p class="flex flex-wrap items-center gap-x-3 gap-y-2 font-mono text-[11px] uppercase tracking-[0.3em] text-silver">
-        <span>{{ registry ? 'Directory' : 'Shared report' }} · checked {{ checkedAgo }}</span>
+        <span>{{ listed ? 'Directory' : 'Shared report' }} · checked {{ checkedAgo }}</span>
         <span v-if="verifiedAt" class="inline-flex items-center gap-1.5 rounded-full bg-white/10 px-2.5 py-1 normal-case tracking-normal text-white" :title="`The owner proved control of the domain on ${verifiedAt.slice(0, 10)}`"><VerifiedTick :size="14" title="" />Verified owner</span>
       </p>
       <div v-if="registry" class="mt-4 max-w-3xl">
@@ -31,7 +31,8 @@
             <RouterLink v-if="listed" to="/servers" class="ml-auto rounded-full bg-emerald-400/10 px-3 py-1 text-xs text-emerald-300">In the public directory</RouterLink>
           </div>
           <AlertsBox v-if="listed" :id="id" />
-          <OwnerBox v-if="listed || blocked" :id="id" :url="report.url" :blocked="blocked" @verified="onVerified" @removed="onRemoved" />
+          <!-- MCP Check's own server needs no owner box: MCP Check is its verified owner. -->
+          <OwnerBox v-if="(listed || blocked) && report.url !== OWN_MCP_URL" :id="id" :url="report.url" :blocked="blocked" @verified="onVerified" @removed="onRemoved" />
         </template>
       </ReportView>
     </template>
@@ -53,6 +54,7 @@ const report = ref<Report | null>(null)
 const listed = ref(false)
 const registry = ref<RegistryInfo>()
 const id = String(route.params.id)
+const OWN_MCP_URL = 'https://mcp.nischaldhakal.com.np/mcp'
 const verifiedAt = ref<string>()
 const blocked = ref(false)
 

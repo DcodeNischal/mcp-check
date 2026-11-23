@@ -10,6 +10,13 @@ import { canonicalUrl, loadReport, serverId } from './store'
 
 export const OWN_ORIGIN = 'https://mcp.nischaldhakal.com.np'
 export const OWN_MCP_URL = `${OWN_ORIGIN}/mcp`
+/** The ownership proof MCP Check serves for its own server at /.well-known/mcp-check.txt. */
+export async function ownProofText(): Promise<string> {
+  return `# MCP Check owns its own MCP server at ${OWN_MCP_URL}
+mcp-check: verify ${await serverId(OWN_MCP_URL)}
+`
+}
+
 const SERVER_INFO = { name: 'mcp-check', title: 'MCP Check', version: '1.0.0', websiteUrl: OWN_ORIGIN }
 const INSTRUCTIONS =
   'MCP Check grades MCP servers against the spec. Use check_server to grade any public server by URL, ' +
