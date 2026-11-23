@@ -38,11 +38,15 @@ sending grade-change alerts.
 
 ## Directory
 
-Shared reports can be listed at `/servers`. Reports made with credentials are never listed. A scheduled
-job re-checks one listed server every 10 minutes once its report is a week old; three failed re-checks in
-a row unlist it. Owners can remove their server by serving `mcp-check: remove <id>` at
-`https://<their-domain>/.well-known/mcp-check.txt` and pressing "Verify and remove" on its report page;
-it can't be listed again after that.
+Shared reports can be listed at `/servers`. Reports made with credentials are never listed. Listed
+servers are re-checked once their report is a week old; three failed re-checks in a row unlist it.
+
+Owners prove control of a server by serving a line at `https://<their-domain>/.well-known/mcp-check.txt`
+and pressing the button on its page:
+
+- `mcp-check: verify <id>` shows a verified-owner mark on the server's page and in the directory. It's
+  re-confirmed at every weekly re-check and dropped if the line is gone.
+- `mcp-check: remove <id>` takes the server out of the directory; it can't be listed again.
 
 ## Registry import
 

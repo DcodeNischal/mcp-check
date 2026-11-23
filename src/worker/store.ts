@@ -204,6 +204,22 @@ const MIGRATIONS: string[][] = [
     `CREATE INDEX IF NOT EXISTS servers_recent ON servers (listed, blocked, checked_at DESC)`,
     `CREATE INDEX IF NOT EXISTS servers_recheck ON servers (COALESCE(last_attempt_at, checked_at)) WHERE listed = 1 AND blocked = 0 AND authenticated = 0`,
   ],
+  [
+    // Owners who proved control of their server's domain (re-confirmed at each weekly re-check).
+    `ALTER TABLE servers ADD COLUMN owner_verified_at TEXT`,
+    // Registry servers that need a per-user credential to reach. Private: never shown on the site.
+    `CREATE TABLE IF NOT EXISTS keyed_servers (
+      registry_name TEXT PRIMARY KEY,
+      url TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      title TEXT,
+      description TEXT,
+      repository_url TEXT,
+      website_url TEXT,
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    )`,
+  ],
 ]
 
 async function migrate(db: D1Database) {
@@ -344,6 +360,7 @@ export interface DirectoryEntry {
   auth_required: number
   checked_at: string
   description: string | null
+  owner_verified_at: string | null
 }
 
 export const PAGE_SIZE = 30
@@ -365,7 +382,7 @@ export async function listServers(db: D1Database, q: { search?: string; grade?: 
   const order = q.sort === 'recent' ? 'checked_at DESC' : 'grade ASC, partial ASC, score DESC, name ASC'
   const page = Math.max(1, q.page ?? 1)
   const [rows, count] = await db.batch([
-    db.prepare(`SELECT id, url, name, grade, score, tools_count, spec_version, era, partial, auth_required, checked_at, description FROM servers WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`).bind(...binds),
+    db.prepare(`SELECT id, url, name, grade, score, tools_count, spec_version, era, partial, auth_required, checked_at, description, owner_verified_at FROM servers WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`).bind(...binds),
     db.prepare(`SELECT COUNT(*) AS n FROM servers WHERE ${where.join(' AND ')}`).bind(...binds),
   ])
   return { servers: (rows?.results ?? []) as DirectoryEntry[], total: Number((count?.results?.[0] as { n?: number } | undefined)?.n ?? 0) }
@@ -422,11 +439,12 @@ export interface StoredServer {
   description: string | null
   repository_url: string | null
   website_url: string | null
+  owner_verified_at: string | null
 }
 
 export async function loadReport(db: D1Database, id: string): Promise<{ meta: StoredServer; report: Report } | undefined> {
   await ensureSchema(db)
-  const row = await db.prepare(`SELECT id, url, name, grade, score, partial, checked_at, last_viewed_at, listed, blocked, registry_name, description, repository_url, website_url, report FROM servers WHERE id = ?`).bind(id).first<StoredServer & { report: ArrayBuffer | number[] }>()
+  const row = await db.prepare(`SELECT id, url, name, grade, score, partial, checked_at, last_viewed_at, listed, blocked, registry_name, description, repository_url, website_url, owner_verified_at, report FROM servers WHERE id = ?`).bind(id).first<StoredServer & { report: ArrayBuffer | number[] }>()
   if (!row) return undefined
   const bytes = row.report instanceof ArrayBuffer ? new Uint8Array(row.report) : Uint8Array.from(row.report)
   const report = JSON.parse(await gunzip(bytes)) as Report

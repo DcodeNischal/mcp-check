@@ -148,7 +148,7 @@ export async function searchServers(env: SearchEnv, q: SearchQuery): Promise<Sea
   // Load the matches, dropping anything unlisted since it was indexed and applying the grade filter
   // to meaning matches (keyword matches were already filtered).
   const { results } = await env.DB
-    .prepare(`SELECT id, url, name, grade, score, tools_count, spec_version, era, partial, auth_required, checked_at, description, tools_text
+    .prepare(`SELECT id, url, name, grade, score, tools_count, spec_version, era, partial, auth_required, checked_at, description, owner_verified_at, tools_text
               FROM servers WHERE id IN (SELECT value FROM json_each(?1)) AND listed = 1 AND blocked = 0 ${q.grade ? 'AND grade = ?2' : ''}`)
     .bind(...(q.grade ? [JSON.stringify(ranked), q.grade] : [JSON.stringify(ranked)]))
     .all<DirectoryEntry & { tools_text: string | null }>()

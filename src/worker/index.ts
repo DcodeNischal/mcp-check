@@ -7,6 +7,7 @@ import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
 import { atomFeed, deliverPending, pruneEvents, recentEvents, subscribe, unsubscribe, WebhookError } from './alerts'
+import { hasProof, markVerified, proofUrl, reconfirmOwner, type ProofAction } from './owners'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
 import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, type QueuedServer } from './registry'
 import { refreshStatsIfDue, storedStats } from './stats'
@@ -161,7 +162,7 @@ app.get('/api/report/:id', async (c) => {
   c.executionCtx.waitUntil(touch(c.env.DB, found.meta).catch(() => {}))
   const m = found.meta
   const registry = m.registry_name ? { name: m.registry_name, description: m.description, repositoryUrl: m.repository_url, websiteUrl: m.website_url } : undefined
-  return c.json({ ok: true, id, report: found.report, listed: !!m.listed, blocked: !!m.blocked, registry }, 200, { 'Cache-Control': 'public, max-age=60' })
+  return c.json({ ok: true, id, report: found.report, listed: !!m.listed, blocked: !!m.blocked, verifiedAt: m.owner_verified_at ?? null, registry }, 200, { 'Cache-Control': 'public, max-age=60' })
 })
 
 // The public directory: listed servers, searchable and filterable.
@@ -197,32 +198,36 @@ app.get('/api/servers', async (c) => {
   return res
 })
 
-// Owner removal: the server's domain must serve /.well-known/mcp-check.txt containing
-// "mcp-check: remove <id>". Then the server is unlisted and can't be listed again.
-app.post('/api/unlist', async (c) => {
+// Owner actions (see src/worker/owners.ts): the server's domain must serve
+// /.well-known/mcp-check.txt containing "mcp-check: verify <id>" or "mcp-check: remove <id>".
+async function ownerAction(c: { req: { header(n: string): string | undefined; json(): Promise<unknown> }; env: Env }, action: ProofAction) {
   const ip = c.req.header('CF-Connecting-IP')
   const { success } = await c.env.CHECK_LIMITER.limit({ key: ip ?? 'unknown' })
-  if (!success) return c.json({ ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' }, 429)
+  if (!success) return { status: 429 as const, body: { ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' } }
   const body = (await c.req.json().catch(() => null)) as { id?: unknown } | null
   const id = typeof body?.id === 'string' ? body.id : ''
-  if (!ID.test(id)) return c.json({ ok: false, error: 'not-found', message: 'No server with this id.' }, 404)
-  const url = await serverUrl(c.env.DB, id)
-  if (!url) return c.json({ ok: false, error: 'not-found', message: 'No server with this id.' }, 404)
+  const url = ID.test(id) ? await serverUrl(c.env.DB, id) : undefined
+  if (!url) return { status: 404 as const, body: { ok: false, error: 'not-found', message: 'No server with this id.' } }
+  if (!(await hasProof(url, id, action))) {
+    return { status: 400 as const, body: { ok: false, error: 'unverified', message: `Couldn't find "mcp-check: ${action} ${id}" at ${proofUrl(url)}.` } }
+  }
+  return { status: 200 as const, id }
+}
 
-  const proofUrl = `${new URL(url).origin}/.well-known/mcp-check.txt`
-  if (!checkTarget(proofUrl).ok) return c.json({ ok: false, error: 'invalid', message: 'This server cannot be verified.' }, 400)
-  let text = ''
-  try {
-    const res = await fetch(proofUrl, { redirect: 'manual', signal: AbortSignal.timeout(10_000) })
-    text = res.ok ? (await res.text()).slice(0, 4096) : ''
-  } catch {
-    text = ''
-  }
-  if (!new RegExp(`mcp-check:\\s*remove\\s+${id}\\b`).test(text)) {
-    return c.json({ ok: false, error: 'unverified', message: `Couldn't find "mcp-check: remove ${id}" at ${proofUrl}.` }, 400)
-  }
-  await blockServer(c.env.DB, id)
+// Removal: the server is unlisted and can't be listed again.
+app.post('/api/unlist', async (c) => {
+  const r = await ownerAction(c, 'remove')
+  if (r.status !== 200) return c.json(r.body, r.status)
+  await blockServer(c.env.DB, r.id)
   return c.json({ ok: true, message: 'Removed from the directory. It will not be listed again.' })
+})
+
+// Verification: the server page shows a verified-owner badge while the proof stays up.
+app.post('/api/verify', async (c) => {
+  const r = await ownerAction(c, 'verify')
+  if (r.status !== 200) return c.json(r.body, r.status)
+  const verifiedAt = await markVerified(c.env.DB, r.id)
+  return c.json({ ok: true, verifiedAt, message: "Verified. This server's page now shows you as its owner." })
 })
 
 // Progress of the registry import and the directory size.
@@ -448,6 +453,7 @@ async function recheck(env: Env) {
     const report = await runCheck(server.url, { vantage: VANTAGE })
     if (report.connected || report.auth) await saveReport(env.DB, server.id, server.url, report)
     else await recordFailure(env.DB, server.id)
+    await reconfirmOwner(env.DB, server.id, server.url).catch((err) => console.error('owner reconfirm failed', String(err)))
     console.log('recheck', server.id, report.connected || report.auth ? report.grade : 'unreachable')
   }
 }

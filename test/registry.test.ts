@@ -37,6 +37,18 @@ describe('registry import', () => {
     })
     expect(candidates.map((c) => c.registryName)).toEqual(['optional-header'])
     expect(nextCursor).toBeUndefined()
+    // Servers that need a per-user key are kept on the private list; unusable ones aren't.
+    const { keyed } = parseRegistryPage({
+      servers: [
+        entry('keyed', [{ type: 'streamable-http', url: 'https://k.example.com/mcp', headers: [{ name: 'X-API-Key', isRequired: true }] }]),
+        entry('templated', [{ type: 'streamable-http', url: 'https://{tenant}.example.com/mcp' }]),
+        entry('query', [{ type: 'streamable-http', url: 'https://q.example.com/mcp?key=abc' }]),
+        entry('both', [{ type: 'streamable-http', url: 'https://b.example.com/mcp?key=1' }, { type: 'streamable-http', url: 'https://b.example.com/public' }]),
+        entry('private', [{ type: 'streamable-http', url: 'https://10.0.0.5/mcp' }]),
+        entry('http', [{ type: 'streamable-http', url: 'http://plain.example.com/mcp', headers: [{ name: 'X-Key', isRequired: true }] }]),
+      ],
+    })
+    expect(keyed.map((k) => [k.registryName, k.reason])).toEqual([['keyed', 'header'], ['templated', 'placeholder'], ['query', 'query']])
   })
 
   it('picks servers on different hosts, avoiding the last one', () => {

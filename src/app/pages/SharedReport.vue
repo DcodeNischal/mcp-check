@@ -11,7 +11,10 @@
     <p v-else-if="state === 'error'" role="alert" class="text-sm text-rose-300">This report could not be loaded. Please try again.</p>
 
     <template v-else-if="report">
-      <p class="font-mono text-[11px] uppercase tracking-[0.3em] text-silver">{{ registry ? 'Directory' : 'Shared report' }} · checked {{ checkedAgo }}</p>
+      <p class="flex flex-wrap items-center gap-x-3 gap-y-2 font-mono text-[11px] uppercase tracking-[0.3em] text-silver">
+        <span>{{ registry ? 'Directory' : 'Shared report' }} · checked {{ checkedAgo }}</span>
+        <span v-if="verifiedAt" class="rounded-full bg-emerald-400/10 px-2.5 py-1 normal-case tracking-normal text-emerald-300" :title="`The owner proved control of the domain on ${verifiedAt.slice(0, 10)}`">✓ Verified owner</span>
+      </p>
       <div v-if="registry" class="mt-4 max-w-3xl">
         <p v-if="registry.description" class="text-base leading-relaxed text-silver">{{ registry.description }}</p>
         <p class="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-silver">
@@ -28,17 +31,7 @@
             <RouterLink v-if="listed" to="/servers" class="ml-auto rounded-full bg-emerald-400/10 px-3 py-1 text-xs text-emerald-300">In the public directory</RouterLink>
           </div>
           <AlertsBox v-if="listed" :id="id" />
-          <details v-if="listed" class="mt-4 text-xs text-silver">
-            <summary class="cursor-pointer hover:text-white">Own this server? Remove it from the directory</summary>
-            <div class="mt-3 space-y-3 rounded-xl border border-white/10 bg-white/[0.02] p-4 leading-relaxed">
-              <p>Prove you control the domain by serving this text at <code class="font-mono text-white/90 break-all">{{ proofUrl }}</code>:</p>
-              <pre class="rounded bg-black/40 p-3 font-mono text-white/90">mcp-check: remove {{ id }}</pre>
-              <button type="button" :disabled="removing" class="rounded-lg border border-white/15 px-3 py-1.5 text-white hover:bg-white/5 disabled:opacity-50 cursor-pointer" @click="remove">
-                {{ removing ? 'Checking…' : 'Verify and remove' }}
-              </button>
-              <p v-if="removeMessage" role="status" :class="removed ? 'text-emerald-300' : 'text-rose-300'">{{ removeMessage }}</p>
-            </div>
-          </details>
+          <OwnerBox v-if="listed" :id="id" :url="report.url" @verified="(at) => (verifiedAt = at)" @removed="listed = false" />
         </template>
       </ReportView>
     </template>
@@ -48,8 +41,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ApiError, getReport, unlistServer, type RegistryInfo, type Report } from '../api'
+import { getReport, type RegistryInfo, type Report } from '../api'
 import AlertsBox from '../components/AlertsBox.vue'
+import OwnerBox from '../components/OwnerBox.vue'
 import ReportView from '../components/ReportView.vue'
 
 const route = useRoute()
@@ -58,32 +52,7 @@ const report = ref<Report | null>(null)
 const listed = ref(false)
 const registry = ref<RegistryInfo>()
 const id = String(route.params.id)
-const removing = ref(false)
-const removed = ref(false)
-const removeMessage = ref('')
-
-const proofUrl = computed(() => {
-  try {
-    return `${new URL(report.value?.url ?? '').origin}/.well-known/mcp-check.txt`
-  } catch {
-    return ''
-  }
-})
-
-async function remove() {
-  removing.value = true
-  removeMessage.value = ''
-  try {
-    const res = await unlistServer(id)
-    removed.value = true
-    listed.value = false
-    removeMessage.value = res.message
-  } catch (err) {
-    removeMessage.value = err instanceof ApiError ? err.message : 'Verification failed. Please try again.'
-  } finally {
-    removing.value = false
-  }
-}
+const verifiedAt = ref<string>()
 
 const checkedAgo = computed(() => {
   if (!report.value) return ''
@@ -97,6 +66,7 @@ onMounted(async () => {
     report.value = found?.report ?? null
     listed.value = !!found?.listed
     registry.value = found?.registry
+    verifiedAt.value = found?.verifiedAt
     state.value = report.value ? 'ready' : 'missing'
   } catch {
     state.value = 'error'

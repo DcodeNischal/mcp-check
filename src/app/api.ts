@@ -58,6 +58,8 @@ export interface StoredReport {
   report: Report
   listed: boolean
   blocked: boolean
+  /** When the owner last proved control of the domain, if they have. */
+  verifiedAt?: string
   registry?: RegistryInfo
 }
 
@@ -66,7 +68,7 @@ export async function getReport(id: string): Promise<StoredReport | null> {
   if (res.status === 404) return null
   const data = (await res.json().catch(() => null)) as ({ ok?: boolean } & Partial<StoredReport>) | null
   if (!res.ok || !data?.report) throw new ApiError('This report could not be loaded.', 'server')
-  return { report: data.report, listed: !!data.listed, blocked: !!data.blocked, ...(data.registry ? { registry: data.registry } : {}) }
+  return { report: data.report, listed: !!data.listed, blocked: !!data.blocked, ...(data.verifiedAt ? { verifiedAt: data.verifiedAt } : {}), ...(data.registry ? { registry: data.registry } : {}) }
 }
 
 export interface DirectoryEntry {
@@ -82,6 +84,7 @@ export interface DirectoryEntry {
   auth_required: number
   checked_at: string
   description: string | null
+  owner_verified_at?: string | null
   /** Why a search result matched, when it isn't obvious from the name or description. */
   match?: string
 }
@@ -97,6 +100,8 @@ export async function listServers(params: { q?: string; grade?: string; sort?: s
 
 export const subscribeWebhook = (id: string, url: string, token: string) =>
   post<{ ok: true; id: string; secret: string; format: 'json' | 'slack' | 'discord' }>('/api/webhooks', { id, url, token })
+
+export const verifyOwner = (id: string) => post<{ ok: true; verifiedAt: string; message: string }>('/api/verify', { id })
 
 export const unlistServer = (id: string) => post<{ ok: true; message: string }>('/api/unlist', { id })
 

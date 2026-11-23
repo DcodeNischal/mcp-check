@@ -35,26 +35,60 @@ const httpsUrl = (v: unknown): string | null => {
   }
 }
 
-/** Turn one registry page into check candidates. Pure, so it can be tested. */
-export function parseRegistryPage(page: unknown): { candidates: Candidate[]; nextCursor?: string } {
+/** A registry server that can't be checked without a per-user credential. */
+export interface KeyedServer {
+  registryName: string
+  url: string
+  /** What it needs: a required header, a URL placeholder, or a query string. */
+  reason: 'header' | 'placeholder' | 'query'
+  title: string | null
+  description: string | null
+  repositoryUrl: string | null
+  websiteUrl: string | null
+}
+
+/**
+ * Turn one registry page into check candidates, plus the servers that need a per-user credential
+ * (kept privately: they're the servers most likely to want to charge for their tools). Pure, so it
+ * can be tested.
+ */
+export function parseRegistryPage(page: unknown): { candidates: Candidate[]; keyed: KeyedServer[]; nextCursor?: string } {
   const data = (page ?? {}) as { servers?: unknown; metadata?: Json }
   const candidates: Candidate[] = []
+  const keyed: KeyedServer[] = []
   for (const item of Array.isArray(data.servers) ? (data.servers as Json[]) : []) {
     const meta = ((item._meta as Json | undefined)?.['io.modelcontextprotocol.registry/official'] ?? {}) as Json
     if (meta.isLatest !== true) continue
     if (meta.status !== undefined && meta.status !== 'active') continue
     const server = (item.server ?? {}) as Json
     const remotes = Array.isArray(server.remotes) ? (server.remotes as Json[]) : []
+    const repo = server.repository as Json | undefined
+    let needs: KeyedServer | undefined
+    let found = false
     for (const remote of remotes) {
       if (remote.type !== 'streamable-http' && remote.type !== 'sse') continue
-      // Required headers mean a per-user API key we don't have.
-      if (Array.isArray(remote.headers) && (remote.headers as Json[]).some((h) => h?.isRequired === true)) continue
       const raw = typeof remote.url === 'string' ? remote.url : ''
-      if (!raw || /[{}]/.test(raw) || raw.includes('?') || raw.includes('#')) continue
+      // Required headers, URL placeholders and query strings mean a per-user key we don't have.
+      const reason: KeyedServer['reason'] | undefined =
+        Array.isArray(remote.headers) && (remote.headers as Json[]).some((h) => h?.isRequired === true) ? 'header'
+          : /[{}]/.test(raw) ? 'placeholder'
+            : raw.includes('?') ? 'query'
+              : undefined
+      if (reason) {
+        if (/^https:\/\//i.test(raw)) {
+          needs ??= {
+            registryName: String(server.name ?? '').slice(0, 200), url: raw.slice(0, 500), reason,
+            title: str(server.title, 120), description: str(server.description, 400),
+            repositoryUrl: httpsUrl(repo?.url), websiteUrl: httpsUrl(server.websiteUrl),
+          }
+        }
+        continue
+      }
+      if (!raw || raw.includes('#')) continue
       if (!checkTarget(raw).ok) continue
       const canonical = canonicalUrl(raw)
       if (!canonical.ok) continue
-      const repo = server.repository as Json | undefined
+      found = true
       candidates.push({
         url: canonical.url,
         host: new URL(canonical.url).hostname,
@@ -67,9 +101,11 @@ export function parseRegistryPage(page: unknown): { candidates: Candidate[]; nex
       })
       break // one URL per server
     }
+    // Only servers with no usable public URL at all count as needing a key.
+    if (!found && needs && needs.registryName) keyed.push(needs)
   }
   const next = typeof data.metadata?.nextCursor === 'string' && data.metadata.nextCursor ? data.metadata.nextCursor : undefined
-  return { candidates, ...(next ? { nextCursor: next } : {}) }
+  return { candidates, keyed, ...(next ? { nextCursor: next } : {}) }
 }
 
 async function setting(db: D1Database, key: string): Promise<string | null> {
@@ -107,7 +143,7 @@ async function syncPage(db: D1Database, fetchImpl: typeof fetch): Promise<{ adde
   const qs = new URLSearchParams({ limit: String(PAGE_SIZE), version: 'latest', ...(cursor ? { cursor } : {}) })
   const res = await fetchImpl(`${REGISTRY_API}?${qs}`, { headers: { Accept: 'application/json', 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(20_000) })
   if (!res.ok) throw new Error(`registry HTTP ${res.status}`)
-  const { candidates, nextCursor } = parseRegistryPage(await res.json())
+  const { candidates, keyed, nextCursor } = parseRegistryPage(await res.json())
 
   const now = new Date().toISOString()
   const statements: D1PreparedStatement[] = []
@@ -121,6 +157,14 @@ async function syncPage(db: D1Database, fetchImpl: typeof fetch): Promise<{ adde
       // Keep the details on already-listed servers current too.
       db.prepare(`UPDATE servers SET registry_name = ?2, description = ?3, repository_url = ?4, website_url = ?5 WHERE id = ?1`)
         .bind(id, c.registryName, c.description, c.repositoryUrl, c.websiteUrl),
+    )
+  }
+  for (const k of keyed) {
+    statements.push(
+      db.prepare(`INSERT INTO keyed_servers (registry_name, url, reason, title, description, repository_url, website_url, first_seen_at, last_seen_at)
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                  ON CONFLICT (registry_name) DO UPDATE SET url = ?2, reason = ?3, title = ?4, description = ?5, repository_url = ?6, website_url = ?7, last_seen_at = ?8`)
+        .bind(k.registryName, k.url, k.reason, k.title, k.description, k.repositoryUrl, k.websiteUrl, now),
     )
   }
   statements.push(putSetting(db, 'registry_cursor', nextCursor ?? null))

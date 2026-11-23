@@ -49,7 +49,10 @@
         <RouterLink :to="`/r/${s.id}`" class="flex items-center gap-4 px-5 py-4 transition hover:bg-white/[0.03]">
           <span class="grid h-11 w-11 shrink-0 place-items-center rounded-xl text-xl font-medium" :class="gradeStyle(s.grade)" :aria-label="`Grade ${s.grade}`">{{ s.grade }}</span>
           <span class="min-w-0 flex-1">
-            <span class="block truncate text-sm text-white">{{ s.name || hostOf(s.url) }}</span>
+            <span class="flex min-w-0 items-center gap-2 text-sm text-white">
+              <span class="truncate">{{ s.name || hostOf(s.url) }}</span>
+              <span v-if="s.owner_verified_at" class="shrink-0 text-xs text-emerald-300" title="The owner proved control of the domain">✓<span class="sr-only"> Verified owner</span></span>
+            </span>
             <span class="block truncate font-mono text-xs text-silver">{{ s.url }}</span>
             <span v-if="s.description" class="mt-1 block truncate text-xs text-silver/80">{{ s.description }}</span>
             <span v-if="s.match" class="mt-1 block truncate font-mono text-[11px] text-emerald-300/90">{{ s.match }}</span>
