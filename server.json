@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "np.com.nischaldhakal/mcp-check",
+  "title": "MCP Check",
+  "description": "Check any MCP server against the spec, and search a graded directory of public MCP servers.",
+  "version": "1.0.0",
+  "websiteUrl": "https://mcp.nischaldhakal.com.np",
+  "repository": {
+    "url": "https://github.com/DcodeNischal/mcp-check",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.nischaldhakal.com.np/mcp"
+    }
+  ]
+}
