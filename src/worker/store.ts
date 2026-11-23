@@ -11,12 +11,10 @@ const MAX_RECEIPT_AGE_MS = 60 * 60 * 1000
 // won't settle a promise in a request other than the one that created it, so a shared in-flight
 // promise whose request ended would leave every later request waiting forever.
 let schemaReady = false
-export async function ensureSchema(db: D1Database): Promise<void> {
-  if (schemaReady) return
-  await db
-    .batch([
-      db.prepare(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`),
-      db.prepare(`CREATE TABLE IF NOT EXISTS servers (
+/** The first tables (MIGRATIONS adds everything since). Exported for the schema tests. */
+export const BASE_SCHEMA = [
+  `CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS servers (
         id TEXT PRIMARY KEY,
         url TEXT NOT NULL UNIQUE,
         name TEXT,
@@ -35,16 +33,20 @@ export async function ensureSchema(db: D1Database): Promise<void> {
         updated_at TEXT NOT NULL,
         last_viewed_at TEXT,
         listed INTEGER NOT NULL DEFAULT 0
-      )`),
-      db.prepare(`CREATE INDEX IF NOT EXISTS servers_listed_grade ON servers (listed, grade, score DESC)`),
-    ])
+      )`,
+  `CREATE INDEX IF NOT EXISTS servers_listed_grade ON servers (listed, grade, score DESC)`,
+]
+
+export async function ensureSchema(db: D1Database): Promise<void> {
+  if (schemaReady) return
+  await db.batch(BASE_SCHEMA.map((sql) => db.prepare(sql)))
   await migrate(db)
   schemaReady = true
 }
 
-// Columns added after the first deploy. Each step runs once; "duplicate column" means another
-// request already applied it, which is fine.
-const MIGRATIONS: string[][] = [
+// Changes since the first deploy. Each step runs once; "duplicate column" or "already exists" means
+// another request applied it at the same moment, which is fine.
+export const MIGRATIONS: string[][] = [
   [
     `ALTER TABLE servers ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE servers ADD COLUMN failures INTEGER NOT NULL DEFAULT 0`,
@@ -242,7 +244,8 @@ async function migrate(db: D1Database) {
       try {
         await db.prepare(sql).run()
       } catch (err) {
-        if (!/duplicate column/i.test(String((err as Error)?.message ?? err))) throw err
+        // Another instance may have applied this step at the same moment.
+        if (!/duplicate column|already exists/i.test(String((err as Error)?.message ?? err))) throw err
       }
     }
     await db.prepare(`INSERT INTO settings (key, value) VALUES ('schema_version', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1`).bind(String(v + 1)).run()
