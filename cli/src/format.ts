@@ -169,6 +169,9 @@ function counts(checks: CheckResult[]) {
 const sorted = (checks: CheckResult[]) =>
   [...checks].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category))
 
+/** Strip control characters from server-supplied text, so it can't send escape codes to the terminal. */
+const safe = (s: string | undefined) => (s ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '')
+
 export function renderText(report: Report, o: { color: boolean; verbose: boolean }, v?: Verdict): string {
   const paint = (code: string) => (s: string) => (o.color ? `\x1b[${code}m${s}\x1b[0m` : s)
   const bold = paint('1')
@@ -176,9 +179,9 @@ export function renderText(report: Report, o: { color: boolean; verbose: boolean
   const tone: Record<Status, (s: string) => string> = { pass: paint('32'), warn: paint('33'), fail: paint('31'), info: paint('36'), skip: dim }
   const gradeTone = report.grade === 'A' || report.grade === 'B' ? tone.pass : report.grade === 'C' ? tone.warn : tone.fail
 
-  const out: string[] = ['', `${bold('MCP Check')}  ${report.url}`, '']
+  const out: string[] = ['', `${bold('MCP Check')}  ${safe(report.url)}`, '']
   if (!report.connected && !report.auth) {
-    out.push(`  ${tone.fail('✗')} ${report.error ?? 'The server did not respond as an MCP server.'}`, '')
+    out.push(`  ${tone.fail('✗')} ${safe(report.error) || 'The server did not respond as an MCP server.'}`, '')
     if (v) out.push(tone.fail(v.message), '')
     return out.join('\n')
   }
@@ -188,9 +191,9 @@ export function renderText(report: Report, o: { color: boolean; verbose: boolean
 
   for (const c of sorted(report.checks)) {
     if (!o.verbose && (c.status === 'pass' || c.status === 'skip' || c.status === 'info')) continue
-    out.push(`  ${tone[c.status](SYMBOL[c.status])} ${bold(c.title)} ${dim(`(${CATEGORY_LABEL[c.category]})`)}`)
-    out.push(`    ${c.detail}`)
-    if (c.fix && c.status !== 'pass') out.push(`    ${dim('Fix:')} ${c.fix}`)
+    out.push(`  ${tone[c.status](SYMBOL[c.status])} ${bold(safe(c.title))} ${dim(`(${CATEGORY_LABEL[c.category]})`)}`)
+    out.push(`    ${safe(c.detail)}`)
+    if (c.fix && c.status !== 'pass') out.push(`    ${dim('Fix:')} ${safe(c.fix)}`)
   }
   const n = counts(report.checks)
   out.push('', `  ${tone.pass(`${n.pass} passed`)} · ${tone.warn(`${n.warn} warning${n.warn === 1 ? '' : 's'}`)} · ${tone.fail(`${n.fail} failed`)}${o.verbose ? '' : dim('  (-v lists passing checks)')}`)

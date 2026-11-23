@@ -42,6 +42,8 @@ export interface AuthSummary {
   clientIdMetadataDocuments?: boolean
   dynamicRegistration?: boolean
   registrationEndpoint?: string
+  /** The authorization server says who issued each response (RFC 9207 `iss`). */
+  issParameterSupported?: boolean
 }
 
 export interface Report {

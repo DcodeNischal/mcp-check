@@ -326,8 +326,21 @@ class SseChannel {
       this.stop.abort()
       return { ok: false, status: res.status, reason: 'stream opened, but no endpoint event' }
     }
-    this.endpoint = new URL(first.value.data.trim(), this.url).toString()
     exchange.messages.push({ event: 'endpoint', data: first.value.data })
+    // Like the official SDK, only accept an endpoint on the stream's own origin (which has already
+    // passed the URL guard), so a server can't point the checker anywhere else.
+    let endpoint: URL
+    try {
+      endpoint = new URL(first.value.data.trim(), this.url)
+    } catch {
+      this.stop.abort()
+      return { ok: false, status: res.status, reason: 'the endpoint event is not a valid URL' }
+    }
+    if (endpoint.origin !== new URL(this.url).origin) {
+      this.stop.abort()
+      return { ok: false, status: res.status, reason: `the endpoint event points to another origin (${endpoint.origin})` }
+    }
+    this.endpoint = endpoint.toString()
     void this.pump(events)
     return { ok: true, status: res.status }
   }

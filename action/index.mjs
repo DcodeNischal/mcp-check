@@ -525,8 +525,19 @@ var SseChannel = class {
       this.stop.abort();
       return { ok: false, status: res.status, reason: "stream opened, but no endpoint event" };
     }
-    this.endpoint = new URL(first.value.data.trim(), this.url).toString();
     exchange.messages.push({ event: "endpoint", data: first.value.data });
+    let endpoint;
+    try {
+      endpoint = new URL(first.value.data.trim(), this.url);
+    } catch {
+      this.stop.abort();
+      return { ok: false, status: res.status, reason: "the endpoint event is not a valid URL" };
+    }
+    if (endpoint.origin !== new URL(this.url).origin) {
+      this.stop.abort();
+      return { ok: false, status: res.status, reason: `the endpoint event points to another origin (${endpoint.origin})` };
+    }
+    this.endpoint = endpoint.toString();
     void this.pump(events);
     return { ok: true, status: res.status };
   }
@@ -609,7 +620,7 @@ function isPrivateIp(host) {
     a === 169 && b === 254 || // link-local, cloud metadata
     a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 192 && b === 0 || a === 198 && (b === 18 || b === 19);
   }
-  return h === "::1" || h === "::" || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith("::ffff:") || h.startsWith("64:ff9b:");
+  return h === "::1" || h === "::" || /^::[0-9a-f]/.test(h) || h.startsWith("64:ff9b:") || h.startsWith("2002:") || /^f[cd]/.test(h) || /^fe[89a-f]/.test(h) || /^ff/.test(h);
 }
 
 // src/checks/auth.ts
@@ -633,7 +644,12 @@ function resourceMetadataCandidates(mcpUrl, fromHeader) {
   ];
 }
 function authServerCandidates(issuer) {
-  const u = new URL(issuer);
+  let u;
+  try {
+    u = new URL(issuer);
+  } catch {
+    return [];
+  }
   const path = u.pathname.replace(/\/$/, "");
   if (!path) return [`${u.origin}/.well-known/oauth-authorization-server`, `${u.origin}/.well-known/openid-configuration`];
   return [
@@ -722,6 +738,7 @@ async function discoverAuth(wire, mcpUrl, challengeHeader, guard) {
     return { summary, checks };
   }
   summary.issuer = issuer;
+  summary.issParameterSupported = asMeta.authorization_response_iss_parameter_supported === true;
   if (typeof asMeta.authorization_endpoint === "string") summary.authorizationEndpoint = asMeta.authorization_endpoint;
   if (typeof asMeta.token_endpoint === "string") summary.tokenEndpoint = asMeta.token_endpoint;
   checks.push(pass("auth.as-metadata", "Authorization server metadata", 3, `Found for ${issuer}, and its issuer matches.`));
@@ -934,7 +951,7 @@ async function runCheck(rawUrl, opts = {}) {
   const started = Date.now();
   const vantage = opts.vantage ?? "the checker";
   const target = checkTarget(rawUrl, opts);
-  const authenticated = Object.keys(opts.headers ?? {}).some((h) => h.toLowerCase() === "authorization");
+  const authenticated = Object.keys(opts.headers ?? {}).length > 0;
   const base = { url: rawUrl, checkedAt: new Date(started).toISOString(), authenticated, steps: [], tools: [], prompts: [], resources: [], resourceTemplates: [] };
   if (!target.ok) {
     return { ...base, durationMs: 0, connected: false, checks: [], score: 0, grade: "F", error: target.reason };
@@ -1178,15 +1195,16 @@ function counts(checks) {
   return { pass: n("pass"), warn: n("warn"), fail: n("fail") };
 }
 var sorted = (checks) => [...checks].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category));
+var safe = (s) => (s ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
 function renderText(report, o, v) {
   const paint = (code) => (s) => o.color ? `\x1B[${code}m${s}\x1B[0m` : s;
   const bold = paint("1");
   const dim = paint("2");
   const tone = { pass: paint("32"), warn: paint("33"), fail: paint("31"), info: paint("36"), skip: dim };
   const gradeTone = report.grade === "A" || report.grade === "B" ? tone.pass : report.grade === "C" ? tone.warn : tone.fail;
-  const out = ["", `${bold("MCP Check")}  ${report.url}`, ""];
+  const out = ["", `${bold("MCP Check")}  ${safe(report.url)}`, ""];
   if (!report.connected && !report.auth) {
-    out.push(`  ${tone.fail("\u2717")} ${report.error ?? "The server did not respond as an MCP server."}`, "");
+    out.push(`  ${tone.fail("\u2717")} ${safe(report.error) || "The server did not respond as an MCP server."}`, "");
     if (v) out.push(tone.fail(v.message), "");
     return out.join("\n");
   }
@@ -1195,9 +1213,9 @@ function renderText(report, o, v) {
   out.push("");
   for (const c of sorted(report.checks)) {
     if (!o.verbose && (c.status === "pass" || c.status === "skip" || c.status === "info")) continue;
-    out.push(`  ${tone[c.status](SYMBOL[c.status])} ${bold(c.title)} ${dim(`(${CATEGORY_LABEL[c.category]})`)}`);
-    out.push(`    ${c.detail}`);
-    if (c.fix && c.status !== "pass") out.push(`    ${dim("Fix:")} ${c.fix}`);
+    out.push(`  ${tone[c.status](SYMBOL[c.status])} ${bold(safe(c.title))} ${dim(`(${CATEGORY_LABEL[c.category]})`)}`);
+    out.push(`    ${safe(c.detail)}`);
+    if (c.fix && c.status !== "pass") out.push(`    ${dim("Fix:")} ${safe(c.fix)}`);
   }
   const n = counts(report.checks);
   out.push("", `  ${tone.pass(`${n.pass} passed`)} \xB7 ${tone.warn(`${n.warn} warning${n.warn === 1 ? "" : "s"}`)} \xB7 ${tone.fail(`${n.fail} failed`)}${o.verbose ? "" : dim("  (-v lists passing checks)")}`);
@@ -1244,6 +1262,7 @@ var setOutput = (name, value) => {
 `);
 };
 var escapeData = (s) => s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+var escapeProperty = (s) => escapeData(s).replace(/:/g, "%3A").replace(/,/g, "%2C");
 async function run() {
   const url = input("url");
   if (!url) throw new Error('The "url" input is required.');
@@ -1279,7 +1298,7 @@ async function run() {
   setOutput("passed", String(v.exitCode === 0));
   setOutput("report", reportPath);
   for (const c of report.checks.filter((c2) => c2.status === "fail")) {
-    process.stdout.write(`::warning title=${escapeData(`MCP Check: ${c.title}`)}::${escapeData(c.fix ? `${c.detail} Fix: ${c.fix}` : c.detail)}
+    process.stdout.write(`::warning title=${escapeProperty(`MCP Check: ${c.title}`)}::${escapeData(c.fix ? `${c.detail} Fix: ${c.fix}` : c.detail)}
 `);
   }
   if (v.exitCode !== 0) {

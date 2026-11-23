@@ -29,7 +29,12 @@ export function resourceMetadataCandidates(mcpUrl: string, fromHeader?: string):
 
 /** Authorization server metadata URLs, in spec order. */
 export function authServerCandidates(issuer: string): string[] {
-  const u = new URL(issuer)
+  let u: URL
+  try {
+    u = new URL(issuer)
+  } catch {
+    return []
+  }
   const path = u.pathname.replace(/\/$/, '')
   if (!path) return [`${u.origin}/.well-known/oauth-authorization-server`, `${u.origin}/.well-known/openid-configuration`]
   return [
@@ -109,6 +114,7 @@ export async function discoverAuth(wire: Wire, mcpUrl: string, challengeHeader: 
     return { summary, checks }
   }
   summary.issuer = issuer
+  summary.issParameterSupported = asMeta.authorization_response_iss_parameter_supported === true
   if (typeof asMeta.authorization_endpoint === 'string') summary.authorizationEndpoint = asMeta.authorization_endpoint
   if (typeof asMeta.token_endpoint === 'string') summary.tokenEndpoint = asMeta.token_endpoint
   checks.push(pass('auth.as-metadata', 'Authorization server metadata', 3, `Found for ${issuer}, and its issuer matches.`))

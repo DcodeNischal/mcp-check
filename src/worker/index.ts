@@ -9,9 +9,10 @@ import { gradeBadge, unknownBadge } from './badge'
 import { atomFeed, deliverPending, pruneEvents, recentEvents, subscribe, unsubscribe, WebhookError } from './alerts'
 import { hasProof, markVerified, proofUrl, reconfirmOwner, type ProofAction } from './owners'
 import { handleMcp, OWN_MCP_URL, OWN_ORIGIN, ownProofText } from './mcp-server'
-import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
+import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, purgeExpiredSignIns, SignInError, startSignIn } from './oauth'
 import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, type QueuedServer } from './registry'
 import { checksLeftToday, countCheck } from './budget'
+import { rateKey, targetKey } from './ratelimit'
 import { refreshStatsIfDue, storedStats } from './stats'
 import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
@@ -58,12 +59,19 @@ app.all('/mcp', (c) => handleMcp(c.req.raw, { env: c.env, ip: c.req.header('CF-C
 // Headers a visitor may pass through to the server they're checking (auth and custom API keys).
 const FORBIDDEN_HEADERS = new Set(['host', 'content-length', 'content-type', 'accept', 'origin', 'cookie', 'connection', 'transfer-encoding', 'mcp-session-id', 'mcp-protocol-version', 'mcp-method', 'mcp-name'])
 
+// Headers that would let a visitor pose as someone else to the server, or as Cloudflare.
+const FORBIDDEN_HEADER_PREFIXES = ['cf-', 'x-forwarded-', 'proxy-', 'sec-']
+const SPOOFING_HEADERS = new Set(['user-agent', 'forwarded', 'x-real-ip', 'true-client-ip', 'x-client-ip', 'via', 'referer'])
+
 function passThroughHeaders(input: unknown): Record<string, string> | string {
   if (input === undefined) return {}
   if (!input || typeof input !== 'object' || Array.isArray(input)) return 'headers must be an object'
   const out: Record<string, string> = {}
   for (const [name, value] of Object.entries(input)) {
-    if (!/^[A-Za-z0-9-]{1,64}$/.test(name) || FORBIDDEN_HEADERS.has(name.toLowerCase())) return `Header "${name}" is not allowed.`
+    const lower = name.toLowerCase()
+    if (!/^[A-Za-z0-9-]{1,64}$/.test(name) || FORBIDDEN_HEADERS.has(lower) || SPOOFING_HEADERS.has(lower) || FORBIDDEN_HEADER_PREFIXES.some((p) => lower.startsWith(p))) {
+      return `Header "${name}" is not allowed.`
+    }
     if (typeof value !== 'string' || value.length > 4096 || /[\r\n]/.test(value)) return `Header "${name}" has an invalid value.`
     out[name] = value
   }
@@ -77,7 +85,7 @@ type GuardResult = { fail: GuardFail } | { fail?: undefined; body: Record<string
 
 async function guard(c: { req: { url: string; header(n: string): string | undefined; json(): Promise<unknown> }; env: Env }, action: string): Promise<GuardResult> {
   const ip = c.req.header('CF-Connecting-IP')
-  const { success } = await c.env.CHECK_LIMITER.limit({ key: ip ?? 'unknown' })
+  const { success } = await c.env.CHECK_LIMITER.limit({ key: rateKey(ip) })
   if (!success) return { fail: { status: 429, error: 'rate-limited', message: 'Too many requests from your network. Try again in a minute.' } }
 
   const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
@@ -93,6 +101,10 @@ async function guard(c: { req: { url: string; header(n: string): string | undefi
   }
   const headers = passThroughHeaders(body.headers)
   if (typeof headers === 'string') return { fail: { status: 400, error: 'bad-request', message: headers } }
+  // Across all visitors, one target host gets a limited number of requests a minute, so nobody can
+  // use MCP Check to flood someone else's server.
+  const target = await c.env.CHECK_LIMITER.limit({ key: targetKey(body.url) })
+  if (!target.success) return { fail: { status: 429, error: 'rate-limited', message: 'That server is being checked a lot right now. Try again in a minute.' } }
   return { body, headers }
 }
 
@@ -158,7 +170,7 @@ app.post('/api/oauth/claim', async (c) => {
 
 app.post('/api/share', async (c) => {
   const ip = c.req.header('CF-Connecting-IP')
-  const { success } = await c.env.CHECK_LIMITER.limit({ key: ip ?? 'unknown' })
+  const { success } = await c.env.CHECK_LIMITER.limit({ key: rateKey(ip) })
   if (!success) return c.json({ ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' }, 429)
   const body = (await c.req.json().catch(() => null)) as { receipt?: unknown; list?: unknown } | null
   const verified = await verifyReceipt(c.env.DB, body?.receipt)
@@ -170,7 +182,7 @@ app.post('/api/share', async (c) => {
   const id = await serverId(canonical.url)
   const saved = await saveReport(c.env.DB, id, canonical.url, report, { list: body?.list === true })
   const origin = new URL(c.req.url).origin
-  return c.json({ ok: true, id, reportUrl: `${origin}/r/${id}`, badgeUrl: `${origin}/badge/${id}.svg`, listed: saved.listed, blocked: saved.blocked })
+  return c.json({ ok: true, id, reportUrl: `${origin}/r/${id}`, badgeUrl: `${origin}/badge/${id}.svg`, listed: saved.listed, blocked: saved.blocked, saved: saved.saved })
 })
 
 app.get('/api/report/:id', async (c) => {
@@ -222,7 +234,7 @@ app.get('/api/servers', async (c) => {
 async function ownerAction(c: { req: { header(n: string): string | undefined; json(): Promise<unknown> }; env: Env }, action: ProofAction) {
   // checkFetch: the proof file may be on this Worker's own domain (MCP Check's own server).
   const ip = c.req.header('CF-Connecting-IP')
-  const { success } = await c.env.CHECK_LIMITER.limit({ key: ip ?? 'unknown' })
+  const { success } = await c.env.CHECK_LIMITER.limit({ key: rateKey(ip) })
   if (!success) return { status: 429 as const, body: { ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' } }
   const body = (await c.req.json().catch(() => null)) as { id?: unknown } | null
   const id = typeof body?.id === 'string' ? body.id : ''
@@ -408,6 +420,7 @@ async function tick(env: Env) {
     (err) => console.error('embedding failed', String(err)),
   )
   await refreshStatsIfDue(env.DB).catch((err) => console.error('stats failed', String(err)))
+  await purgeExpiredSignIns(env.DB).catch((err) => console.error('sign-in purge failed', String(err)))
   await checkOwnServer(env).catch((err) => console.error('own server check failed', String(err)))
   if (await syncDue(env.DB)) {
     await syncStep(env.DB).then(

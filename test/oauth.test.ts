@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { authorizeUrl, clientMetadata, discoverSignIn, parseRegistration, parseTokenResponse, pkceChallenge, SignInError, tokenRequest } from '../src/worker/oauth'
+import { authorizeUrl, clientMetadata, discoverSignIn, parseRegistration, parseTokenResponse, pkceChallenge, resourceCovers, sameOriginEndpoints, SignInError, tokenRequest } from '../src/worker/oauth'
 import { asFetch, protectedServer } from './fixtures/servers'
 
 const ORIGIN = 'https://mcp.nischaldhakal.com.np'
@@ -25,6 +25,32 @@ describe('OAuth sign-in', () => {
     await expect(discoverSignIn('https://mcp.example.com/mcp', asFetch(protectedServer({ issuerMismatch: true })))).rejects.toThrow(SignInError)
     const open = asFetch(async () => new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }), { headers: { 'content-type': 'application/json' } }))
     await expect(discoverSignIn('https://open.example.com/mcp', open)).rejects.toThrow(/doesn't ask for sign-in/)
+  })
+
+  it('only signs in for the server itself, and refuses borrowed sign-in pages', async () => {
+    expect(resourceCovers('https://mcp.example.com', 'https://mcp.example.com/mcp')).toBe(true)
+    expect(resourceCovers('https://mcp.example.com/mcp', 'https://mcp.example.com/mcp')).toBe(true)
+    expect(resourceCovers('https://mcp.example.com/mcp', 'https://mcp.example.com/mcpx')).toBe(false)
+    expect(resourceCovers('https://honest.example.com/mcp', 'https://mcp.example.com/mcp')).toBe(false)
+    expect(sameOriginEndpoints({ issuer: 'https://auth.example.com', authorizationEndpoint: 'https://auth.example.com/authorize', tokenEndpoint: 'https://auth.example.com/token' })).toBe(true)
+    expect(sameOriginEndpoints({ issuer: 'https://evil.example', authorizationEndpoint: 'https://honest-as.example/authorize', tokenEndpoint: 'https://evil.example/token' })).toBe(false)
+
+    const json = (body: unknown) => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+    // A server whose metadata names another server's resource.
+    const otherResource = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/oauth-protected-resource/mcp')) return json({ resource: 'https://honest.example.com/mcp', authorization_servers: ['https://auth.example.com'] })
+      return asFetch(protectedServer())(input, init)
+    }) as typeof fetch
+    await expect(discoverSignIn('https://mcp.example.com/mcp', otherResource)).rejects.toThrow(/not to this server/)
+
+    // An issuer that borrows another server's sign-in page and doesn't say who answers (no iss).
+    const borrowed = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === 'https://auth.example.com/.well-known/oauth-authorization-server') {
+        return json({ issuer: 'https://auth.example.com', authorization_endpoint: 'https://honest-as.example/authorize', token_endpoint: 'https://auth.example.com/token', code_challenge_methods_supported: ['S256'], client_id_metadata_document_supported: true })
+      }
+      return asFetch(protectedServer())(input, init)
+    }) as typeof fetch
+    await expect(discoverSignIn('https://mcp.example.com/mcp', borrowed)).rejects.toThrow(/own address/)
   })
 
   it('builds the authorization URL with PKCE, state and resource', async () => {

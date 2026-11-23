@@ -39,7 +39,7 @@
           <button type="button" class="px-2 text-silver hover:text-white cursor-pointer" :aria-label="`Remove header ${h.name || i + 1}`" @click="extra.splice(i, 1)">✕</button>
         </div>
         <button v-if="extra.length < 5" type="button" class="text-xs text-silver hover:text-white cursor-pointer" @click="extra.push({ name: '', value: '' })">+ Add header</button>
-        <p class="text-xs leading-relaxed text-silver/80">Sent only to the server you're checking, for this check. Never stored or shown in reports, and reports made while signed in are never listed in the directory.</p>
+        <p class="text-xs leading-relaxed text-silver/80">Sent only to the server you're checking, for this check. Never stored or shown in reports, and reports made while signed in or with custom headers are never listed in the directory.</p>
       </div>
     </details>
 

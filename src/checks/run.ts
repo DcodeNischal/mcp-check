@@ -26,7 +26,9 @@ export async function runCheck(rawUrl: string, opts: CheckOptions = {}): Promise
   const started = Date.now()
   const vantage = opts.vantage ?? 'the checker'
   const target = checkTarget(rawUrl, opts)
-  const authenticated = Object.keys(opts.headers ?? {}).some((h) => h.toLowerCase() === 'authorization')
+  // Any visitor-supplied header (a token, an API key, anything else) can change what the server
+  // shows, so the report is treated as private: never listed, never replacing a public listing.
+  const authenticated = Object.keys(opts.headers ?? {}).length > 0
   const base = { url: rawUrl, checkedAt: new Date(started).toISOString(), authenticated, steps: [], tools: [], prompts: [], resources: [], resourceTemplates: [] }
   if (!target.ok) {
     return { ...base, durationMs: 0, connected: false, checks: [], score: 0, grade: 'F', error: target.reason }

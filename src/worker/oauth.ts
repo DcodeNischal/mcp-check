@@ -58,7 +58,39 @@ export async function discoverSignIn(url: string, fetchImpl?: typeof fetch): Pro
   if (!/^https:\/\//i.test(summary.authorizationEndpoint) || !isPublicHttps(summary.tokenEndpoint)) {
     throw new SignInError("This server's sign-in endpoints must be public https URLs.")
   }
+  // The token must be for this server: a server can't send visitors to sign in for another one.
+  if (summary.resource && !resourceCovers(summary.resource, url)) {
+    throw new SignInError(`This server's metadata asks for a sign-in to ${summary.resource}, not to this server, so MCP Check won't sign in.`)
+  }
+  // Mix-up protection: endpoints on another origin than the issuer are only trusted if the
+  // authorization server confirms who answered (iss), so a fake issuer can't borrow a real
+  // server's sign-in page and collect the code.
+  if (!sameOriginEndpoints(summary) && !summary.issParameterSupported) {
+    throw new SignInError("This server's sign-in pages aren't on its authorization server's own address, and it doesn't confirm who answers, so MCP Check won't sign in.")
+  }
   return summary
+}
+
+/** Does the protected resource identifier cover the checked URL (same origin, path prefix)? */
+export function resourceCovers(resource: string, url: string): boolean {
+  try {
+    const r = new URL(resource)
+    const u = new URL(url)
+    const path = r.pathname.replace(/\/$/, '')
+    return r.origin === u.origin && (u.pathname === path || u.pathname.startsWith(`${path}/`) || path === '')
+  } catch {
+    return false
+  }
+}
+
+/** Are the authorization and token endpoints on the issuer's own origin? */
+export function sameOriginEndpoints(auth: Pick<AuthSummary, 'issuer' | 'authorizationEndpoint' | 'tokenEndpoint'>): boolean {
+  try {
+    const origin = new URL(auth.issuer!).origin
+    return new URL(auth.authorizationEndpoint!).origin === origin && new URL(auth.tokenEndpoint!).origin === origin
+  } catch {
+    return false
+  }
 }
 
 // --- client registration ---------------------------------------------------------------------
@@ -140,9 +172,9 @@ export async function startSignIn(db: D1Database, url: string, origin: string, f
   const resource = auth.resource ?? url
   await db.batch([
     db.prepare(`DELETE FROM oauth_pending WHERE created_at < ?1`).bind(Date.now() - PENDING_TTL_S * 1000),
-    db.prepare(`INSERT INTO oauth_pending (state, server_url, issuer, token_endpoint, client_id, client_secret, auth_method, redirect_uri, verifier, resource, created_at)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)`)
-      .bind(state, url, auth.issuer, auth.tokenEndpoint, client.clientId, client.clientSecret ?? null, client.authMethod, redirectUri, verifier, resource, Date.now()),
+    db.prepare(`INSERT INTO oauth_pending (state, server_url, issuer, token_endpoint, client_id, client_secret, auth_method, redirect_uri, verifier, resource, created_at, require_iss)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`)
+      .bind(state, url, auth.issuer, auth.tokenEndpoint, client.clientId, client.clientSecret ?? null, client.authMethod, redirectUri, verifier, resource, Date.now(), sameOriginEndpoints(auth) ? 0 : 1),
   ])
   return { authorizeUrl: authorizeUrl(auth, client, { redirectUri, state, challenge: await pkceChallenge(verifier), resource }), state }
 }
@@ -159,6 +191,7 @@ interface Pending {
   verifier: string
   resource: string
   created_at: number
+  require_iss: number
 }
 
 async function loadPending(db: D1Database, state: string): Promise<Pending | undefined> {
@@ -213,6 +246,7 @@ export async function finishSignIn(db: D1Database, state: string, query: URLSear
   // RFC 9207: if the server says who issued the response, it must be the server we started with.
   const iss = query.get('iss')
   if (iss && iss !== pending.issuer) return fail('The sign-in response came from a different authorization server, so it was rejected.')
+  if (!iss && pending.require_iss) return fail("The authorization server didn't confirm it issued this response, so it was rejected.")
   const code = query.get('code')
   if (!code) return fail("The server's sign-in didn't return a code.")
   if (!isPublicHttps(pending.token_endpoint)) return fail("The server's token endpoint isn't a public https URL.")
@@ -230,6 +264,11 @@ export async function finishSignIn(db: D1Database, state: string, query: URLSear
   } catch (err) {
     return fail(err instanceof SignInError ? err.message : "The server's token endpoint couldn't be reached.")
   }
+}
+
+/** Forget sign-ins that were never finished or claimed (and any token they hold). */
+export async function purgeExpiredSignIns(db: D1Database): Promise<void> {
+  await db.prepare(`DELETE FROM oauth_pending WHERE created_at < ?1`).bind(Date.now() - PENDING_TTL_S * 1000).run()
 }
 
 /** Hand the token to the page that started the sign-in, once. */

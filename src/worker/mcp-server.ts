@@ -5,6 +5,7 @@ import { runCheck } from '../checks/run'
 import type { Report } from '../checks/types'
 import { LEGACY_VERSIONS, MODERN_VERSION } from '../mcp/types'
 import { searchServers, type SearchEnv } from './search'
+import { rateKey, targetKey } from './ratelimit'
 import { storedStats } from './stats'
 import { canonicalUrl, loadReport, serverId } from './store'
 
@@ -192,8 +193,10 @@ async function callTool(name: string, args: Json, ctx: McpContext): Promise<{ te
     case 'check_server': {
       const url = typeof args.url === 'string' ? args.url.trim() : ''
       if (!url) throw new ToolError('Give the server URL, for example https://mcp.example.com/mcp.')
-      const { success } = await env.CHECK_LIMITER.limit({ key: ctx.ip ?? 'unknown' })
+      const { success } = await env.CHECK_LIMITER.limit({ key: rateKey(ctx.ip) })
       if (!success) throw new ToolError('Too many checks from your network. Try again in a minute.')
+      const target = await env.CHECK_LIMITER.limit({ key: targetKey(url) })
+      if (!target.success) throw new ToolError('That server is being checked a lot right now. Try again in a minute.')
       const report = await runCheck(url, { vantage: "Cloudflare's network", ...(ctx.fetch ? { fetch: ctx.fetch } : {}) })
       if (!report.connected && !report.auth) throw new ToolError(`Couldn't check ${url}: ${report.error ?? 'it did not respond as an MCP server.'}`)
       const s = summarize(report, `${OWN_ORIGIN}/?url=${encodeURIComponent(url)}`)

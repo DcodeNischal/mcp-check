@@ -45,7 +45,7 @@ export const startSignIn = (url: string, token: string) => post<{ ok: true; auth
 export const claimSignIn = () => post<{ ok: true; url: string; accessToken: string; expiresIn?: number; scope?: string }>('/api/oauth/claim', {})
 
 export const shareReport = (receipt: Receipt, list: boolean) =>
-  post<{ ok: true; id: string; reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean }>('/api/share', { receipt, list })
+  post<{ ok: true; id: string; reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean; saved?: boolean }>('/api/share', { receipt, list })
 
 export interface RegistryInfo {
   name: string

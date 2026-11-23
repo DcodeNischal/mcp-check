@@ -23,6 +23,7 @@
         Shared. Anyone with the link can see this report.
         <template v-if="shared.listed"> It's <RouterLink to="/servers" class="underline underline-offset-4">listed in the directory</RouterLink>.</template>
         <span v-else-if="shared.blocked" class="text-silver">Its owner removed it from the directory, so it isn't listed.</span>
+        <span v-if="shared.kept" class="block text-silver">A newer report, or the public listing, is already stored for this server, so the link shows that one. Reports made with a token or custom headers never replace a public listing.</span>
       </p>
       <div v-for="item in links" :key="item.label">
         <p class="text-[11px] font-mono uppercase tracking-widest text-silver">{{ item.label }}</p>
@@ -48,7 +49,7 @@ const props = defineProps<{ report: Report; receipt: Receipt }>()
 const busy = ref(false)
 const error = ref('')
 const copied = ref('')
-const shared = ref<{ reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean } | null>(null)
+const shared = ref<{ reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean; kept: boolean } | null>(null)
 const list = ref(true)
 
 const links = computed(() =>
@@ -65,7 +66,7 @@ async function share() {
   error.value = ''
   try {
     const res = await shareReport(props.receipt, list.value && !props.report.authenticated)
-    shared.value = { reportUrl: res.reportUrl, badgeUrl: res.badgeUrl, listed: res.listed, blocked: res.blocked }
+    shared.value = { reportUrl: res.reportUrl, badgeUrl: res.badgeUrl, listed: res.listed, blocked: res.blocked, kept: res.saved === false }
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : 'Sharing failed. Please try again.'
   } finally {

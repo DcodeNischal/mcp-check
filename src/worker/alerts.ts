@@ -56,17 +56,22 @@ export function webhookFormat(url: string): WebhookFormat {
 }
 
 /** The request body for a delivery, in the webhook's format. */
+// Server names come from the servers themselves: never let them ping a Discord channel
+// (@everyone) or add a link to a Slack message (<url|text>).
+const slackText = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+const discordBody = (text: string) => JSON.stringify({ content: text, username: 'MCP Check', allowed_mentions: { parse: [] } })
+
 export function webhookBody(format: WebhookFormat, e: ServerEvent | 'ping', origin: string, server: { id: string; url: string; name: string | null }): string {
   const reportUrl = `${origin}/r/${server.id}`
   if (e === 'ping') {
     const text = `MCP Check alerts are set up for ${label(server)}: ${reportUrl}`
-    if (format === 'slack') return JSON.stringify({ text })
-    if (format === 'discord') return JSON.stringify({ content: text, username: 'MCP Check' })
+    if (format === 'slack') return JSON.stringify({ text: slackText(text) })
+    if (format === 'discord') return discordBody(text)
     return JSON.stringify({ type: 'ping', server: { id: server.id, url: server.url, name: server.name, reportUrl }, at: new Date().toISOString() })
   }
   const text = `${eventText(e)}: ${reportUrl}`
-  if (format === 'slack') return JSON.stringify({ text })
-  if (format === 'discord') return JSON.stringify({ content: text, username: 'MCP Check' })
+  if (format === 'slack') return JSON.stringify({ text: slackText(text) })
+  if (format === 'discord') return discordBody(text)
   return JSON.stringify({
     type: e.type,
     server: { id: server.id, url: server.url, name: server.name, reportUrl },

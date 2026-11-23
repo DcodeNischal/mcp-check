@@ -78,15 +78,31 @@ describe('saving reports', () => {
   })
 
   it('a re-check without registry details keeps them', async () => {
-    await saveReport(DB, ID, URL_, report())
+    await saveReport(DB, ID, URL_, report({ checkedAt: '2026-12-01T00:00:00.000Z' }))
     expect(raw.prepare(`SELECT registry_name, description FROM servers WHERE id = ?`).get(ID)).toEqual({ registry_name: 'com.example/mail', description: 'Sends mail.' })
   })
 
   it('rebuilds the search entry when indexed text changes', async () => {
-    const n = await rowsWritten(() => saveReport(DB, ID, URL_, report({ tools: [{ name: 'list_calendars', description: 'List calendars.' }] })))
+    const n = await rowsWritten(() => saveReport(DB, ID, URL_, report({ checkedAt: '2026-12-02T00:00:00.000Z', tools: [{ name: 'list_calendars', description: 'List calendars.' }] })))
     expect(n).toBeGreaterThan(1)
     expect(searchHits('calendars')).toEqual([ID])
     expect(searchHits('send_email')).toEqual([])
+  })
+})
+
+describe('reports that must not replace the stored one', () => {
+  it('an older report (a replayed receipt) is kept out and writes nothing', async () => {
+    let result: Awaited<ReturnType<typeof saveReport>> | undefined
+    const n = await rowsWritten(async () => (result = await saveReport(DB, ID, URL_, report({ checkedAt: '2026-01-01T00:00:00.000Z', grade: 'F', score: 10 }))))
+    expect(n).toBe(0)
+    expect(result).toMatchObject({ saved: false, listed: true })
+    expect(raw.prepare(`SELECT grade FROM servers WHERE id = ?`).get(ID)).toEqual({ grade: 'A' })
+  })
+
+  it('a report made with credentials or custom headers never replaces a public listing', async () => {
+    const result = await saveReport(DB, ID, URL_, report({ checkedAt: '2027-01-01T00:00:00.000Z', authenticated: true, grade: 'D', score: 61 }))
+    expect(result).toMatchObject({ saved: false, listed: true })
+    expect(raw.prepare(`SELECT grade, listed FROM servers WHERE id = ?`).get(ID)).toEqual({ grade: 'A', listed: 1 })
   })
 })
 

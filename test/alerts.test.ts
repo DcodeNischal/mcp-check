@@ -36,8 +36,9 @@ describe('webhooks', () => {
   })
 
   it('formats each kind of payload', () => {
-    expect(JSON.parse(webhookBody('slack', event(), ORIGIN, server))).toEqual({ text: `Docs <Search> & more improved from C to A (74 → 93/100): ${ORIGIN}/r/abcdefgh2345` })
-    expect(JSON.parse(webhookBody('discord', event(), ORIGIN, server))).toMatchObject({ username: 'MCP Check', content: expect.stringContaining('improved from C to A') })
+    // Server names can't add Slack links or ping a Discord channel.
+    expect(JSON.parse(webhookBody('slack', event(), ORIGIN, server))).toEqual({ text: `Docs &lt;Search&gt; &amp; more improved from C to A (74 → 93/100): ${ORIGIN}/r/abcdefgh2345` })
+    expect(JSON.parse(webhookBody('discord', event({ name: '@everyone hi' }), ORIGIN, server))).toMatchObject({ username: 'MCP Check', content: expect.stringContaining('@everyone hi'), allowed_mentions: { parse: [] } })
     expect(JSON.parse(webhookBody('json', event(), ORIGIN, server))).toEqual({
       type: 'grade_changed',
       server: { id: 'abcdefgh2345', url: 'https://docs.example.com/mcp', name: 'Docs', reportUrl: `${ORIGIN}/r/abcdefgh2345` },

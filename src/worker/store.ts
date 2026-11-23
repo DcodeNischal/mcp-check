@@ -235,6 +235,10 @@ export const MIGRATIONS: string[][] = [
     `DROP INDEX IF EXISTS registry_pending`,
     `DROP INDEX IF EXISTS servers_listed_grade`,
   ],
+  [
+    // OAuth mix-up protection: sign-ins whose endpoints aren't on the issuer's origin must get an iss.
+    `ALTER TABLE oauth_pending ADD COLUMN require_iss INTEGER NOT NULL DEFAULT 0`,
+  ],
 ]
 
 async function migrate(db: D1Database) {
@@ -329,7 +333,12 @@ export interface RegistryDetails {
   websiteUrl: string | null
 }
 
-export async function saveReport(db: D1Database, id: string, url: string, report: Report, opts: { list?: boolean; registry?: RegistryDetails } = {}): Promise<{ listed: boolean; blocked: boolean }> {
+/**
+ * Save a report. An older report never replaces a newer one (so a replayed receipt changes and writes
+ * nothing), and a report made with credentials or custom headers never replaces a server that's
+ * listed or removed by its owner. `saved` is false when the stored report was kept.
+ */
+export async function saveReport(db: D1Database, id: string, url: string, report: Report, opts: { list?: boolean; registry?: RegistryDetails } = {}): Promise<{ listed: boolean; blocked: boolean; saved: boolean }> {
   await ensureSchema(db)
   const blob = await gzip(JSON.stringify({ ...report, url }))
   const now = new Date().toISOString()
@@ -346,6 +355,7 @@ export async function saveReport(db: D1Database, id: string, url: string, report
                 description = CASE WHEN ?20 = 1 THEN ?22 ELSE servers.description END,
                 repository_url = CASE WHEN ?20 = 1 THEN ?23 ELSE servers.repository_url END,
                 website_url = CASE WHEN ?20 = 1 THEN ?24 ELSE servers.website_url END
+              WHERE excluded.checked_at > servers.checked_at AND NOT (?12 = 1 AND (servers.listed = 1 OR servers.blocked = 1))
               RETURNING listed, blocked`)
     .bind(
       id, url,
@@ -357,7 +367,9 @@ export async function saveReport(db: D1Database, id: string, url: string, report
       opts.registry ? 1 : 0, opts.registry?.registryName ?? null, opts.registry?.description ?? null, opts.registry?.repositoryUrl ?? null, opts.registry?.websiteUrl ?? null,
     )
     .first<{ listed: number; blocked: number }>()
-  return { listed: !!row?.listed, blocked: !!row?.blocked }
+  if (row) return { listed: !!row.listed, blocked: !!row.blocked, saved: true }
+  const kept = await db.prepare(`SELECT listed, blocked FROM servers WHERE id = ?1`).bind(id).first<{ listed: number; blocked: number }>()
+  return { listed: !!kept?.listed, blocked: !!kept?.blocked, saved: false }
 }
 
 // --- the directory --------------------------------------------------------------------------

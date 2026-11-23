@@ -54,6 +54,8 @@ export function isPrivateIp(host: string): boolean {
       (a === 198 && (b === 18 || b === 19))
     )
   }
-  // IPv6: loopback, unspecified, unique-local, link-local, and any other IPv4-mapped form.
-  return h === '::1' || h === '::' || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith('::ffff:') || h.startsWith('64:ff9b:')
+  // IPv6: loopback, unspecified, IPv4-compatible and IPv4-mapped (::/96, ::ffff:0:0/96), NAT64,
+  // 6to4, unique-local, link-local, site-local and multicast.
+  return h === '::1' || h === '::' || /^::[0-9a-f]/.test(h) || h.startsWith('64:ff9b:') || h.startsWith('2002:') ||
+    /^f[cd]/.test(h) || /^fe[89a-f]/.test(h) || /^ff/.test(h)
 }

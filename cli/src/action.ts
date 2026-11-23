@@ -11,6 +11,8 @@ const setOutput = (name: string, value: string) => {
   if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `${name}=${value}\n`)
 }
 const escapeData = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
+// Workflow command properties (title=...) also need : and , escaped.
+const escapeProperty = (s: string) => escapeData(s).replace(/:/g, '%3A').replace(/,/g, '%2C')
 
 async function run(): Promise<void> {
   const url = input('url')
@@ -51,7 +53,7 @@ async function run(): Promise<void> {
   setOutput('report', reportPath)
 
   for (const c of report.checks.filter((c) => c.status === 'fail')) {
-    process.stdout.write(`::warning title=${escapeData(`MCP Check: ${c.title}`)}::${escapeData(c.fix ? `${c.detail} Fix: ${c.fix}` : c.detail)}\n`)
+    process.stdout.write(`::warning title=${escapeProperty(`MCP Check: ${c.title}`)}::${escapeData(c.fix ? `${c.detail} Fix: ${c.fix}` : c.detail)}\n`)
   }
   if (v.exitCode !== 0) {
     process.stdout.write(`::error title=MCP Check::${escapeData(v.message)}\n`)
