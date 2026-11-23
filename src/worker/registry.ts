@@ -48,6 +48,52 @@ export interface KeyedServer {
 }
 
 /**
+ * Does a registry name's namespace prove it belongs to this host? Reverse-DNS namespaces are verified
+ * by the registry through DNS or HTTP on that domain (com.example/x covers example.com and its
+ * subdomains); io.github.* namespaces only prove a GitHub account.
+ */
+export function nsMatchesHost(registryName: string, host: string): boolean {
+  const ns = registryName.split('/')[0]?.toLowerCase() ?? ''
+  if (!ns || ns.startsWith('io.github.')) return false
+  const domain = ns.split('.').reverse().join('.')
+  const h = host.toLowerCase()
+  return h === domain || h.endsWith(`.${domain}`)
+}
+
+/**
+ * The registry's website and source links for a server, kept only when they plausibly belong to it:
+ * anything when the namespace proves the domain, the server's own site, or (for io.github.<user>)
+ * that user's GitHub repositories. Anyone can publish a registry entry pointing at any URL.
+ */
+export function trustedRegistryLinks(registryName: string, serverUrl: string, websiteUrl: string | null, repositoryUrl: string | null): { websiteUrl: string | null; repositoryUrl: string | null } {
+  let host = ''
+  try {
+    host = new URL(serverUrl).hostname.toLowerCase()
+  } catch {
+    return { websiteUrl: null, repositoryUrl: null }
+  }
+  const proven = nsMatchesHost(registryName, host)
+  const user = registryName.match(/^io\.github\.([a-z0-9-]+)\//i)?.[1]?.toLowerCase()
+  const site = (u: string) => {
+    try {
+      const h = new URL(u).hostname.toLowerCase()
+      return proven || h === host || host.endsWith(`.${h}`) || h.endsWith(`.${host}`)
+    } catch {
+      return false
+    }
+  }
+  const repo = (u: string) => {
+    try {
+      const p = new URL(u)
+      return proven || (!!user && p.hostname.toLowerCase() === 'github.com' && p.pathname.toLowerCase().startsWith(`/${user}/`))
+    } catch {
+      return false
+    }
+  }
+  return { websiteUrl: websiteUrl && site(websiteUrl) ? websiteUrl : null, repositoryUrl: repositoryUrl && repo(repositoryUrl) ? repositoryUrl : null }
+}
+
+/**
  * Turn one registry page into check candidates, plus the servers that need a per-user credential
  * (kept privately: they're the servers most likely to want to charge for their tools). Pure, so it
  * can be tested.
@@ -150,16 +196,23 @@ async function syncPage(db: D1Database, fetchImpl: typeof fetch): Promise<{ adde
   for (const c of candidates) {
     const id = await serverId(c.url)
     statements.push(
-      db.prepare(`INSERT INTO registry (url, id, host, registry_name, title, description, version, repository_url, website_url, first_seen_at, last_seen_at)
-                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
-                  ON CONFLICT (url) DO UPDATE SET registry_name = ?4, title = ?5, description = ?6, version = ?7, repository_url = ?8, website_url = ?9, last_seen_at = ?10
-                  WHERE registry.registry_name IS NOT ?4 OR registry.title IS NOT ?5 OR registry.description IS NOT ?6 OR registry.version IS NOT ?7
-                     OR registry.repository_url IS NOT ?8 OR registry.website_url IS NOT ?9`)
-        .bind(c.url, id, c.host, c.registryName, c.title, c.description, c.version, c.repositoryUrl, c.websiteUrl, now),
-      // Keep the details on already-listed servers current too.
-      db.prepare(`UPDATE servers SET registry_name = ?2, description = ?3, repository_url = ?4, website_url = ?5
-                  WHERE id = ?1 AND (registry_name IS NOT ?2 OR description IS NOT ?3 OR repository_url IS NOT ?4 OR website_url IS NOT ?5)`)
-        .bind(id, c.registryName, c.description, c.repositoryUrl, c.websiteUrl),
+      // Several registry entries can name the same URL (the registry doesn't check who owns it).
+      // The entry already stored keeps it, unless a new one's namespace proves the server's domain
+      // and the stored one's doesn't. The same entry is only rewritten when it changed.
+      db.prepare(`INSERT INTO registry (url, id, host, registry_name, title, description, version, repository_url, website_url, first_seen_at, last_seen_at, ns_match)
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)
+                  ON CONFLICT (url) DO UPDATE SET registry_name = ?4, title = ?5, description = ?6, version = ?7, repository_url = ?8, website_url = ?9, last_seen_at = ?10, ns_match = ?11
+                  WHERE (registry.registry_name = ?4 AND (registry.title IS NOT ?5 OR registry.description IS NOT ?6 OR registry.version IS NOT ?7
+                          OR registry.repository_url IS NOT ?8 OR registry.website_url IS NOT ?9))
+                     OR (registry.registry_name != ?4 AND ?11 = 1 AND registry.ns_match = 0)`)
+        .bind(c.url, id, c.host, c.registryName, c.title, c.description, c.version, c.repositoryUrl, c.websiteUrl, now, nsMatchesHost(c.registryName, c.host) ? 1 : 0),
+      // Listed servers mirror whichever entry owns their URL, written only when it changed.
+      db.prepare(`UPDATE servers SET registry_name = r.registry_name, description = r.description, repository_url = r.repository_url, website_url = r.website_url
+                  FROM registry r
+                  WHERE r.url = ?1 AND servers.id = r.id
+                    AND (servers.registry_name IS NOT r.registry_name OR servers.description IS NOT r.description
+                      OR servers.repository_url IS NOT r.repository_url OR servers.website_url IS NOT r.website_url)`)
+        .bind(c.url),
     )
   }
   for (const k of keyed) {

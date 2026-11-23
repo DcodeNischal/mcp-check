@@ -23,7 +23,7 @@ export interface ServerEvent {
 
 export type WebhookFormat = 'json' | 'slack' | 'discord'
 
-const MAX_WEBHOOKS_PER_SERVER = 5
+const MAX_WEBHOOKS_PER_SERVER = 20
 /** Retry delays after a failed delivery; after the last one the delivery is dropped. */
 const RETRY_MINUTES = [5, 30, 120]
 /** A webhook is switched off after this many dropped deliveries in a row. */
@@ -156,7 +156,11 @@ async function post(url: string, body: string, headers: Record<string, string>, 
 }
 
 /** Subscribe a webhook to a listed server. It must accept a test ping first. */
-export async function subscribe(db: D1Database, serverId: string, url: string, origin: string, fetchImpl: typeof fetch = fetch): Promise<{ id: string; secret: string; format: WebhookFormat }> {
+/**
+ * Subscribe a webhook to a listed server. It must accept a test ping first. `subscriber` identifies the
+ * visitor's network (hashed): one webhook each per server, so nobody can take every slot.
+ */
+export async function subscribe(db: D1Database, serverId: string, url: string, origin: string, subscriber: string, fetchImpl: typeof fetch = fetch): Promise<{ id: string; secret: string; format: WebhookFormat }> {
   await ensureSchema(db)
   if (!checkTarget(url).ok) throw new WebhookError('Webhook URLs must be public https:// addresses.')
   if (url.length > 1000) throw new WebhookError('That URL is too long.')
@@ -164,6 +168,8 @@ export async function subscribe(db: D1Database, serverId: string, url: string, o
   if (!server) throw new WebhookError('Alerts are only available for servers listed in the directory.')
   const count = await db.prepare(`SELECT COUNT(*) AS n FROM webhooks WHERE server_id = ?1 AND active = 1`).bind(serverId).first<number>('n')
   if ((count ?? 0) >= MAX_WEBHOOKS_PER_SERVER) throw new WebhookError(`This server already has ${MAX_WEBHOOKS_PER_SERVER} webhooks.`)
+  const mine = await db.prepare(`SELECT COUNT(*) AS n FROM webhooks WHERE server_id = ?1 AND subscriber = ?2 AND active = 1`).bind(serverId, subscriber).first<number>('n')
+  if ((mine ?? 0) > 0) throw new WebhookError('You already have a webhook on this server. Remove it with its secret to add another.')
 
   const format = webhookFormat(url)
   const secret = randomSecret()
@@ -174,10 +180,26 @@ export async function subscribe(db: D1Database, serverId: string, url: string, o
     throw new WebhookError(status ? `The test message got HTTP ${status}, so the webhook wasn't saved.` : "The test message couldn't be delivered, so the webhook wasn't saved.")
   }
   await db
-    .prepare(`INSERT INTO webhooks (id, server_id, url, secret, format, active, failures, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, ?6)`)
-    .bind(id, serverId, url, secret, format, new Date().toISOString())
+    .prepare(`INSERT INTO webhooks (id, server_id, url, secret, format, active, failures, created_at, subscriber) VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, ?6, ?7)`)
+    .bind(id, serverId, url, secret, format, new Date().toISOString(), subscriber)
     .run()
   return { id, secret, format }
+}
+
+/** A server's verified owner removes every webhook on it. Returns how many were removed. */
+export async function clearWebhooks(db: D1Database, serverId: string): Promise<number> {
+  await ensureSchema(db)
+  const [, removed] = await db.batch([
+    db.prepare(`DELETE FROM deliveries WHERE webhook_id IN (SELECT id FROM webhooks WHERE server_id = ?1)`).bind(serverId),
+    db.prepare(`DELETE FROM webhooks WHERE server_id = ?1`).bind(serverId),
+  ])
+  return removed?.meta?.changes ?? 0
+}
+
+/** A stable, non-reversible id for a visitor's network, for the one-webhook-each rule. */
+export async function subscriberId(networkKey: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`mcp-check-subscriber:${networkKey}`)))
+  return [...digest.slice(0, 12)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
 
 /** Unsubscribe with the secret given at subscription. */

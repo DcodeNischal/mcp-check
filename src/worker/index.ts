@@ -6,17 +6,18 @@ import { runTool } from '../checks/call'
 import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
-import { atomFeed, deliverPending, pruneEvents, recentEvents, subscribe, unsubscribe, WebhookError } from './alerts'
+import { atomFeed, clearWebhooks, deliverPending, pruneEvents, recentEvents, subscribe, subscriberId, unsubscribe, WebhookError } from './alerts'
+import { loadPrivateReport, PRIVATE_ID, purgeExpiredPrivateReports, savePrivateReport } from './private'
 import { hasProof, markVerified, proofUrl, reconfirmOwner, type ProofAction } from './owners'
 import { handleMcp, OWN_MCP_URL, OWN_ORIGIN, ownProofText } from './mcp-server'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, purgeExpiredSignIns, SignInError, startSignIn } from './oauth'
-import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, type QueuedServer } from './registry'
+import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, trustedRegistryLinks, type QueuedServer } from './registry'
 import { checksLeftToday, countCheck } from './budget'
 import { rateKey, targetKey } from './ratelimit'
 import { refreshStatsIfDue, storedStats } from './stats'
 import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
-import { checkTarget } from '../security/target'
+import { checkTarget, reserveZone } from '../security/target'
 import { verifyTurnstile, type TurnstileEnv } from './turnstile'
 
 export interface Env extends TurnstileEnv {
@@ -42,6 +43,9 @@ function checkFetch(env: Env): typeof fetch {
     return url.host === own && env.SELF ? env.SELF.fetch(new Request(input, init)) : fetch(input, init)
   }) as typeof fetch
 }
+
+// Checks can't reach MCP Check's own zone (the website and anything else there), only its own host.
+reserveZone('nischaldhakal.com.np', ['mcp.nischaldhakal.com.np'])
 
 const app = new Hono<{ Bindings: Env }>()
 const VANTAGE = "Cloudflare's network"
@@ -179,9 +183,13 @@ app.post('/api/share', async (c) => {
   if (!report.connected && !report.auth) return c.json({ ok: false, error: 'invalid', message: "Reports for servers that couldn't be reached can't be shared." }, 400)
   const canonical = canonicalUrl(report.url)
   if (!canonical.ok) return c.json({ ok: false, error: 'invalid', message: canonical.reason }, 400)
+  const origin = new URL(c.req.url).origin
+  if (report.authenticated) {
+    const p = await savePrivateReport(c.env.DB, canonical.url, report)
+    return c.json({ ok: true, id: p.id, private: true, expiresAt: p.expiresAt, reportUrl: `${origin}/p/${p.id}`, listed: false, blocked: false, saved: true }, 200, { 'Cache-Control': 'no-store' })
+  }
   const id = await serverId(canonical.url)
   const saved = await saveReport(c.env.DB, id, canonical.url, report, { list: body?.list === true })
-  const origin = new URL(c.req.url).origin
   return c.json({ ok: true, id, reportUrl: `${origin}/r/${id}`, badgeUrl: `${origin}/badge/${id}.svg`, listed: saved.listed, blocked: saved.blocked, saved: saved.saved })
 })
 
@@ -189,10 +197,11 @@ app.get('/api/report/:id', async (c) => {
   const id = c.req.param('id')
   if (!ID.test(id)) return c.json({ ok: false, error: 'not-found' }, 404)
   const found = await loadReport(c.env.DB, id)
-  if (!found) return c.json({ ok: false, error: 'not-found', message: 'No report with this id.' }, 404)
+  if (!found || (found.report.authenticated && !found.meta.listed)) return c.json({ ok: false, error: 'not-found', message: 'No report with this id.' }, 404)
   c.executionCtx.waitUntil(touch(c.env.DB, found.meta).catch(() => {}))
   const m = found.meta
-  const registry = m.registry_name ? { name: m.registry_name, description: m.description, repositoryUrl: m.repository_url, websiteUrl: m.website_url } : undefined
+  const links = m.registry_name ? trustedRegistryLinks(m.registry_name, m.url, m.website_url, m.repository_url) : undefined
+  const registry = m.registry_name ? { name: m.registry_name, description: m.description, ...links } : undefined
   return c.json({ ok: true, id, report: found.report, listed: !!m.listed, blocked: !!m.blocked, verifiedAt: m.owner_verified_at ?? null, registry }, 200, { 'Cache-Control': 'public, max-age=60' })
 })
 
@@ -222,6 +231,8 @@ app.get('/api/servers', async (c) => {
   const key = new Request(new URL(`/api/servers?${new URLSearchParams({ q: search.toLowerCase(), sort: sortParam ?? '', page: String(page), grade })}`, c.req.url))
   const hit = await cache.match(key)
   if (hit) return hit
+  const limited = await c.env.CHECK_LIMITER.limit({ key: `search:${rateKey(c.req.header('CF-Connecting-IP'))}` })
+  if (!limited.success) return c.json({ ok: false, error: 'rate-limited', message: 'Too many searches. Try again in a minute.' }, 429)
   const sort = sortParam === 'recent' || sortParam === 'grade' ? sortParam : 'relevance'
   const result = await searchServers(c.env, { search, sort, page, pageSize: PAGE_SIZE, pinnedUrl: OWN_MCP_URL, ...gradeFilter })
   const res = c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
@@ -252,6 +263,14 @@ app.post('/api/unlist', async (c) => {
   if (r.status !== 200) return c.json(r.body, r.status)
   await blockServer(c.env.DB, r.id)
   return c.json({ ok: true, message: "Removed from the directory. To list it again later, serve the verify line and press Verify." })
+})
+
+// A verified owner (the same proof) removes every webhook on their server.
+app.post('/api/owner/clear-alerts', async (c) => {
+  const r = await ownerAction(c, 'verify')
+  if (r.status !== 200) return c.json(r.body, r.status)
+  const removed = await clearWebhooks(c.env.DB, r.id)
+  return c.json({ ok: true, removed, message: removed ? `Removed ${removed} webhook${removed === 1 ? '' : 's'}.` : 'There were no webhooks on this server.' })
 })
 
 // Verification: the server page shows a verified-owner badge while the proof stays up.
@@ -308,12 +327,30 @@ app.post('/api/webhooks', async (c) => {
   const serverId = typeof g.body.id === 'string' ? g.body.id : ''
   if (!ID.test(serverId)) return c.json({ ok: false, error: 'not-found', message: 'No server with this id.' }, 404)
   try {
-    const hook = await subscribe(c.env.DB, serverId, (g.body.url as string).trim(), new URL(c.req.url).origin)
+    const subscriber = await subscriberId(rateKey(c.req.header('CF-Connecting-IP')))
+    const hook = await subscribe(c.env.DB, serverId, (g.body.url as string).trim(), new URL(c.req.url).origin, subscriber)
     return c.json({ ok: true, ...hook }, 200, { 'Cache-Control': 'no-store' })
   } catch (err) {
     if (err instanceof WebhookError) return c.json({ ok: false, error: 'invalid', message: err.message }, 400)
     throw err
   }
+})
+
+// A private report, by its random id. Never cached by shared caches.
+app.get('/api/private/:id', async (c) => {
+  const found = PRIVATE_ID.test(c.req.param('id')) ? await loadPrivateReport(c.env.DB, c.req.param('id')) : undefined
+  if (!found) return c.json({ ok: false, error: 'not-found', message: 'No report with this link.' }, 404, { 'Cache-Control': 'no-store' })
+  return c.json({ ok: true, report: found.report, expiresAt: found.expiresAt }, 200, { 'Cache-Control': 'private, no-store', 'X-Robots-Tag': 'noindex' })
+})
+
+// The private report page: the app, kept out of search engines.
+app.get('/p/:id', async (c) => {
+  const page = await c.env.ASSETS.fetch(new Request(new URL('/', c.req.url)))
+  const headers = new Headers(page.headers)
+  headers.set('X-Robots-Tag', 'noindex, nofollow')
+  headers.set('Cache-Control', 'private, no-store')
+  headers.set('Referrer-Policy', 'no-referrer')
+  return new Response(page.body, { status: 200, headers })
 })
 
 app.post('/api/webhooks/:hook/delete', async (c) => {
@@ -357,7 +394,7 @@ app.get('/r/:id', async (c) => {
   const id = c.req.param('id')
   const page = await c.env.ASSETS.fetch(new Request(new URL('/', c.req.url)))
   const found = ID.test(id) ? await loadReport(c.env.DB, id).catch(() => undefined) : undefined
-  if (!found) return new Response(page.body, { status: 404, headers: page.headers })
+  if (!found || (found.report.authenticated && !found.meta.listed)) return new Response(page.body, { status: 404, headers: page.headers })
 
   const { report } = found
   const origin = new URL(c.req.url).origin
@@ -421,6 +458,7 @@ async function tick(env: Env) {
   )
   await refreshStatsIfDue(env.DB).catch((err) => console.error('stats failed', String(err)))
   await purgeExpiredSignIns(env.DB).catch((err) => console.error('sign-in purge failed', String(err)))
+  await purgeExpiredPrivateReports(env.DB).catch((err) => console.error('private report purge failed', String(err)))
   await checkOwnServer(env).catch((err) => console.error('own server check failed', String(err)))
   if (await syncDue(env.DB)) {
     await syncStep(env.DB).then(

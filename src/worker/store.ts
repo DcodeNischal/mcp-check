@@ -239,6 +239,20 @@ export const MIGRATIONS: string[][] = [
     // OAuth mix-up protection: sign-ins whose endpoints aren't on the issuer's origin must get an iss.
     `ALTER TABLE oauth_pending ADD COLUMN require_iss INTEGER NOT NULL DEFAULT 0`,
   ],
+  [
+    // Reports made with a token or custom headers, under random links (see private.ts).
+    `CREATE TABLE IF NOT EXISTS private_reports (
+      id TEXT PRIMARY KEY,
+      url TEXT NOT NULL,
+      report BLOB NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS private_reports_created ON private_reports (created_at)`,
+    // Who added a webhook (a hash of their network), so one visitor can't take every slot.
+    `ALTER TABLE webhooks ADD COLUMN subscriber TEXT`,
+    // Whether a registry entry's namespace proves it belongs to the server's domain.
+    `ALTER TABLE registry ADD COLUMN ns_match INTEGER NOT NULL DEFAULT 0`,
+  ],
 ]
 
 async function migrate(db: D1Database) {

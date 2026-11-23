@@ -2,15 +2,18 @@
   <div class="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
     <div v-if="!shared" class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div>
-        <p class="text-sm text-white">Share this report</p>
+        <p class="text-sm text-white">{{ report.authenticated ? 'Share this report privately' : 'Share this report' }}</p>
         <p class="mt-1 text-xs leading-relaxed text-silver">
-          Get a public link and a README badge. Sharing again later updates the same link and badge.
-          <template v-if="report.authenticated"><br /><span class="text-amber-300">This check used your credentials, so sharing makes its tool list public.</span></template>
+          <template v-if="report.authenticated">
+            This check used a token or custom headers, so you get a private link instead: random, not listed, hidden from search
+            engines, and it expires in 30 days. <span class="text-amber-300">Anyone you give the link to can see its tools.</span>
+          </template>
+          <template v-else>Get a public link and a README badge. Sharing again later updates the same link and badge.</template>
         </p>
       </div>
       <div class="flex shrink-0 flex-col items-start gap-2 sm:items-end">
         <button type="button" :disabled="busy" class="rounded-lg bg-white px-4 py-2 text-sm text-black disabled:opacity-60 cursor-pointer" @click="share">
-          {{ busy ? 'Sharing…' : 'Share report' }}
+          {{ busy ? 'Sharing…' : report.authenticated ? 'Get a private link' : 'Share report' }}
         </button>
         <label v-if="!report.authenticated" class="flex items-center gap-2 text-xs text-silver">
           <input v-model="list" type="checkbox" /> List in the public directory
@@ -20,7 +23,7 @@
 
     <div v-else class="space-y-4">
       <p class="text-sm text-emerald-300">
-        Shared. Anyone with the link can see this report.
+        {{ shared.private ? 'Private link ready. It expires in 30 days.' : 'Shared. Anyone with the link can see this report.' }}
         <template v-if="shared.listed"> It's <RouterLink to="/servers" class="underline underline-offset-4">listed in the directory</RouterLink>.</template>
         <span v-else-if="shared.blocked" class="text-silver">Its owner removed it from the directory, so it isn't listed.</span>
         <span v-if="shared.kept" class="block text-silver">A newer report, or the public listing, is already stored for this server, so the link shows that one. Reports made with a token or custom headers never replace a public listing.</span>
@@ -33,7 +36,7 @@
         </div>
       </div>
       <div class="flex items-center gap-3">
-        <img :src="shared.badgeUrl" alt="MCP Check badge preview" height="20" />
+        <img v-if="shared.badgeUrl" :src="shared.badgeUrl" alt="MCP Check badge preview" height="20" />
         <a :href="shared.reportUrl" class="text-xs text-silver underline decoration-white/30 underline-offset-4 hover:text-white">Open the report page</a>
       </div>
     </div>
@@ -49,14 +52,14 @@ const props = defineProps<{ report: Report; receipt: Receipt }>()
 const busy = ref(false)
 const error = ref('')
 const copied = ref('')
-const shared = ref<{ reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean; kept: boolean } | null>(null)
+const shared = ref<{ reportUrl: string; badgeUrl?: string; listed: boolean; blocked: boolean; kept: boolean; private: boolean } | null>(null)
 const list = ref(true)
 
 const links = computed(() =>
   shared.value
     ? [
-        { label: 'Report link', value: shared.value.reportUrl },
-        { label: 'README badge (Markdown)', value: `[![MCP Check](${shared.value.badgeUrl})](${shared.value.reportUrl})` },
+        { label: shared.value.private ? 'Private link' : 'Report link', value: shared.value.reportUrl },
+        ...(shared.value.badgeUrl ? [{ label: 'README badge (Markdown)', value: `[![MCP Check](${shared.value.badgeUrl})](${shared.value.reportUrl})` }] : []),
       ]
     : [],
 )
@@ -66,7 +69,7 @@ async function share() {
   error.value = ''
   try {
     const res = await shareReport(props.receipt, list.value && !props.report.authenticated)
-    shared.value = { reportUrl: res.reportUrl, badgeUrl: res.badgeUrl, listed: res.listed, blocked: res.blocked, kept: res.saved === false }
+    shared.value = { reportUrl: res.reportUrl, ...(res.badgeUrl ? { badgeUrl: res.badgeUrl } : {}), listed: res.listed, blocked: res.blocked, kept: res.saved === false, private: !!res.private }
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : 'Sharing failed. Please try again.'
   } finally {

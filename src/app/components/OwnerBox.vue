@@ -27,6 +27,10 @@
         </div>
       </div>
       <p v-if="message" role="status" :class="ok ? 'text-emerald-300' : 'text-rose-300'">{{ message }}</p>
+      <p>
+        Unwanted alerts on your server? With the verify line in place,
+        <button type="button" :disabled="busy !== ''" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white disabled:opacity-50 cursor-pointer" @click="run('clear')">{{ busy === 'clear' ? 'checking…' : 'remove every webhook on it' }}</button>.
+      </p>
 
       <!-- For the owner who just verified: the one moment charging for their tools is relevant. -->
       <div v-if="justVerified" class="rounded-xl border border-emerald-400/25 bg-emerald-400/[0.05] p-4">
@@ -49,11 +53,11 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { ApiError, unlistServer, verifyOwner } from '../api'
+import { ApiError, clearAlerts, unlistServer, verifyOwner } from '../api'
 
 const props = defineProps<{ id: string; url: string; blocked?: boolean }>()
 const emit = defineEmits<{ verified: [at: string, relisted: boolean]; removed: [] }>()
-const busy = ref<'' | 'verify' | 'remove'>('')
+const busy = ref<'' | 'verify' | 'remove' | 'clear'>('')
 const message = ref('')
 const ok = ref(false)
 const justVerified = ref(false)
@@ -70,7 +74,7 @@ const proofUrl = computed(() => {
 const nexus402 = (placement: string) =>
   `https://app.nexus402.dev/?utm_source=mcp-check&utm_medium=referral&utm_campaign=nexus402_launch&utm_content=${placement}`
 
-async function run(action: 'verify' | 'remove') {
+async function run(action: 'verify' | 'remove' | 'clear') {
   busy.value = action
   message.value = ''
   try {
@@ -79,6 +83,8 @@ async function run(action: 'verify' | 'remove') {
       justVerified.value = true
       emit('verified', res.verifiedAt, res.relisted)
       message.value = res.message
+    } else if (action === 'clear') {
+      message.value = (await clearAlerts(props.id)).message
     } else {
       const res = await unlistServer(props.id)
       emit('removed')

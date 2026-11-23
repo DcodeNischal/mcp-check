@@ -11,6 +11,13 @@ export type TargetVerdict = { ok: true; url: URL } | { ok: false; reason: string
 
 const BLOCKED_SUFFIXES = ['.localhost', '.local', '.internal', '.intranet', '.lan', '.home.arpa', '.corp']
 
+// Hosts the deployment keeps out of reach (its own zone), except the ones listed as allowed. Set once
+// by the Worker at startup; the CLI never sets it.
+let reserved: { zone: string; allow: Set<string> } | undefined
+export function reserveZone(zone: string, allow: string[] = []): void {
+  reserved = { zone: zone.toLowerCase(), allow: new Set(allow.map((h) => h.toLowerCase())) }
+}
+
 export function checkTarget(raw: string, policy: TargetPolicy = {}): TargetVerdict {
   let url: URL
   try {
@@ -31,6 +38,9 @@ export function checkTarget(raw: string, policy: TargetPolicy = {}): TargetVerdi
   }
   if (host === 'localhost' || BLOCKED_SUFFIXES.some((s) => host.endsWith(s)) || !host.includes('.')) {
     return { ok: false, reason: 'Local and internal hostnames can only be checked with the CLI.' }
+  }
+  if (reserved && (host === reserved.zone || host.endsWith(`.${reserved.zone}`)) && !reserved.allow.has(host)) {
+    return { ok: false, reason: "This host can't be checked from here." }
   }
   return { ok: true, url }
 }

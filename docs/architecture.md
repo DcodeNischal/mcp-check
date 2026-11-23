@@ -64,6 +64,15 @@ Reports are saved only when someone shares one (or the import lists a server), a
 from the Worker that produced the grade, so nobody can upload a made-up grade. Reports made with
 credentials are never listed.
 
+Reports made with a token or custom headers are private: they're never listed or stored on the server's
+public page (whose id is a hash of its URL, so anyone could find it), and sharing one gives a random
+`/p/<id>` link instead, marked `noindex` and deleted after 30 days.
+
+Several registry entries can name the same URL, because the registry doesn't check who owns a remote URL.
+The stored entry keeps it unless a new one's namespace proves the server's domain (a reverse-DNS namespace
+like `com.example/…` for `*.example.com`), and the page only shows website and source links that the
+namespace backs.
+
 Owners prove control of a server by serving a line at `https://<domain>/.well-known/mcp-check.txt`:
 `mcp-check: verify <id>` gives the server a verified-owner tick (re-confirmed at every weekly re-check),
 and `mcp-check: remove <id>` takes it out of the directory until the owner verifies again.
@@ -96,7 +105,9 @@ access token only until the page claims it (once, within ten minutes), then dele
 Triggers on the `servers` table record an event whenever a server is listed, changes grade, or is dropped
 after failing re-checks; each event queues a delivery for every active webhook on that server.
 
-Webhooks must answer a test message with 2xx before they're saved (five per server at most). Slack and
+Webhooks must answer a test message with 2xx before they're saved: one per visitor per server (visitors
+are identified by a hash of their network), 20 per server at most, and a server's verified owner can remove
+them all. Slack and
 Discord webhook URLs get a readable message; other URLs get JSON signed with
 `X-MCP-Check-Signature: sha256=<HMAC-SHA256 of the body>`:
 

@@ -45,7 +45,17 @@ export const startSignIn = (url: string, token: string) => post<{ ok: true; auth
 export const claimSignIn = () => post<{ ok: true; url: string; accessToken: string; expiresIn?: number; scope?: string }>('/api/oauth/claim', {})
 
 export const shareReport = (receipt: Receipt, list: boolean) =>
-  post<{ ok: true; id: string; reportUrl: string; badgeUrl: string; listed: boolean; blocked: boolean; saved?: boolean }>('/api/share', { receipt, list })
+  post<{ ok: true; id: string; reportUrl: string; badgeUrl?: string; listed: boolean; blocked: boolean; saved?: boolean; private?: boolean; expiresAt?: string }>('/api/share', { receipt, list })
+
+export async function getPrivateReport(id: string): Promise<{ report: Report; expiresAt: string } | null> {
+  const res = await fetch(`/api/private/${encodeURIComponent(id)}`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
+  if (res.status === 404) return null
+  const data = (await res.json().catch(() => null)) as { report?: Report; expiresAt?: string } | null
+  if (!res.ok || !data?.report) throw new ApiError('This report could not be loaded.', 'server')
+  return { report: data.report, expiresAt: data.expiresAt ?? '' }
+}
+
+export const clearAlerts = (id: string) => post<{ ok: true; removed: number; message: string }>('/api/owner/clear-alerts', { id })
 
 export interface RegistryInfo {
   name: string

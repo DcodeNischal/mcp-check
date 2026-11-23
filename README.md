@@ -95,8 +95,9 @@ from the official MCP Registry, plus servers people share, each re-checked weekl
 
 ## Privacy and safety
 
-- Tokens and custom headers are used for one check and never stored, logged or shown in reports. Reports
-  made with a token or custom headers are never listed, and never replace a server's public listing.
+- Tokens and custom headers are used for one check and never stored, logged or shown in reports. A report
+  made with them is never listed and never replaces a server's public page; sharing it gives a random private
+  link that's hidden from search engines and expires after 30 days.
 - Online checks only contact public HTTPS addresses, including any URL a server hands back during OAuth
   discovery. Private and local addresses are refused (the CLI allows `localhost` on purpose).
 - Grades can't be faked: a report is only saved with a signature from the Worker that produced it.

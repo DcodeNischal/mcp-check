@@ -205,6 +205,8 @@ async function callTool(name: string, args: Json, ctx: McpContext): Promise<{ te
     case 'search_servers': {
       const query = typeof args.query === 'string' ? args.query.trim().slice(0, 100) : ''
       if (query.length < 2) throw new ToolError('Give a search query of at least two characters.')
+      const limited = await env.CHECK_LIMITER.limit({ key: `search:${rateKey(ctx.ip)}` })
+      if (!limited.success) throw new ToolError('Too many searches. Try again in a minute.')
       const grade = typeof args.grade === 'string' && GRADES.includes(args.grade) ? args.grade : undefined
       const limit = Math.min(20, Math.max(1, Number.isInteger(args.limit) ? (args.limit as number) : 10))
       const found = await searchServers(env, { search: query, sort: 'relevance', page: 1, pageSize: limit, ...(grade ? { grade } : {}) })

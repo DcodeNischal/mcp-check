@@ -40,3 +40,30 @@ describe('deprecated SSE transport', () => {
     expect(seen.some((u) => u.startsWith('https://victim.example'))).toBe(false)
   })
 })
+
+describe("MCP Check's own zone", () => {
+  it('is out of reach except the MCP host itself', async () => {
+    const { reserveZone } = await import('../src/security/target')
+    reserveZone('nischaldhakal.com.np', ['mcp.nischaldhakal.com.np'])
+    expect(checkTarget('https://nischaldhakal.com.np/api/guestbook').ok).toBe(false)
+    expect(checkTarget('https://www.nischaldhakal.com.np/').ok).toBe(false)
+    expect(checkTarget('https://mcp.nischaldhakal.com.np/mcp').ok).toBe(true)
+    expect(checkTarget('https://notnischaldhakal.com.np/').ok).toBe(true)
+    // The CLI (allowLocal) isn't affected.
+    expect(checkTarget('https://nischaldhakal.com.np/', { allowLocal: true }).ok).toBe(true)
+  })
+})
+
+describe('registry namespaces and links', () => {
+  it('only trusts what the namespace proves', async () => {
+    const { nsMatchesHost, trustedRegistryLinks } = await import('../src/worker/registry')
+    expect(nsMatchesHost('np.com.nischaldhakal/mcp-check', 'mcp.nischaldhakal.com.np')).toBe(true)
+    expect(nsMatchesHost('app.linear/mcp', 'mcp.linear.app')).toBe(true)
+    expect(nsMatchesHost('io.github.someone/server', 'mcp.linear.app')).toBe(false)
+    expect(nsMatchesHost('com.evil/server', 'mcp.linear.app')).toBe(false)
+    // A squatter's links on someone else's server are hidden; the owner's own are kept.
+    expect(trustedRegistryLinks('io.github.attacker/x', 'https://mcp.victim.com/mcp', 'https://evil.example', 'https://github.com/attacker/x')).toEqual({ websiteUrl: null, repositoryUrl: 'https://github.com/attacker/x' })
+    expect(trustedRegistryLinks('io.github.attacker/x', 'https://mcp.victim.com/mcp', 'https://victim.com', 'https://github.com/victim/x')).toEqual({ websiteUrl: 'https://victim.com', repositoryUrl: null })
+    expect(trustedRegistryLinks('com.victim/mcp', 'https://mcp.victim.com/mcp', 'https://docs.example.org', 'https://gitlab.com/v/x')).toEqual({ websiteUrl: 'https://docs.example.org', repositoryUrl: 'https://gitlab.com/v/x' })
+  })
+})

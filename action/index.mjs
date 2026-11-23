@@ -586,6 +586,7 @@ function isImplementation(value) {
 
 // src/security/target.ts
 var BLOCKED_SUFFIXES = [".localhost", ".local", ".internal", ".intranet", ".lan", ".home.arpa", ".corp"];
+var reserved;
 function checkTarget(raw, policy = {}) {
   let url;
   try {
@@ -605,6 +606,9 @@ function checkTarget(raw, policy = {}) {
   }
   if (host === "localhost" || BLOCKED_SUFFIXES.some((s) => host.endsWith(s)) || !host.includes(".")) {
     return { ok: false, reason: "Local and internal hostnames can only be checked with the CLI." };
+  }
+  if (reserved && (host === reserved.zone || host.endsWith(`.${reserved.zone}`)) && !reserved.allow.has(host)) {
+    return { ok: false, reason: "This host can't be checked from here." };
   }
   return { ok: true, url };
 }

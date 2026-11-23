@@ -5,6 +5,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { beforeAll, describe, expect, it } from 'vitest'
 import type { Report } from '../src/checks/types'
 import { checksLeftToday, countCheck, DAILY_CHECK_BUDGET } from '../src/worker/budget'
+import { clearWebhooks, subscribe } from '../src/worker/alerts'
+import { loadPrivateReport, savePrivateReport } from '../src/worker/private'
 import { syncStep } from '../src/worker/registry'
 import { saveReport, serverId } from '../src/worker/store'
 
@@ -18,7 +20,11 @@ function d1(db: DatabaseSync): D1Database {
       const row = db.prepare(sql).get(...params.map(norm)) as Record<string, unknown> | undefined
       return row ? (col ? row[col] : row) : null
     },
-    all: async () => ({ results: db.prepare(sql).all(...params.map(norm)), success: true, meta: {} }),
+    // Like D1, a statement in a batch reports its rows, or how many rows it changed.
+    all: async () =>
+      /^\s*select\b/i.test(sql) || /\breturning\b/i.test(sql)
+        ? { results: db.prepare(sql).all(...params.map(norm)), success: true, meta: {} }
+        : { results: [], success: true, meta: { changes: Number(db.prepare(sql).run(...params.map(norm)).changes) } },
     run: async () => ({ success: true, results: [], meta: { changes: Number(db.prepare(sql).run(...params.map(norm)).changes) } }),
   })
   return {
@@ -144,5 +150,47 @@ describe('daily check budget', () => {
     expect(await checksLeftToday(DB)).toBe(DAILY_CHECK_BUDGET - 2)
     raw.prepare(`UPDATE settings SET value = ? WHERE key = 'checks_day'`).run(`${today}:${DAILY_CHECK_BUDGET + 5}`)
     expect(await checksLeftToday(DB)).toBe(0)
+  })
+})
+
+describe('registry entries that name the same server', () => {
+  const entry = (name: string, description: string, websiteUrl?: string) => ({
+    server: { name, title: name, description, version: '1.0.0', ...(websiteUrl ? { websiteUrl } : {}), remotes: [{ type: 'streamable-http', url: 'https://mcp.squat.example/mcp' }] },
+    _meta: { 'io.modelcontextprotocol.registry/official': { status: 'active', isLatest: true } },
+  })
+  const serve = (servers: unknown[]) => (async () => new Response(JSON.stringify({ servers, metadata: {} }), { headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
+  const stored = () => raw.prepare(`SELECT registry_name, description FROM registry WHERE url = 'https://mcp.squat.example/mcp'`).get()
+
+  it('a domain-proven entry takes over, and a squatter can never take it back', async () => {
+    await syncStep(DB, serve([entry('io.github.squatter/x', 'Visit evil.example')]))
+    expect(stored()).toEqual({ registry_name: 'io.github.squatter/x', description: 'Visit evil.example' })
+    await syncStep(DB, serve([entry('example.squat/mcp', 'The real server')]))
+    expect(stored()).toEqual({ registry_name: 'example.squat/mcp', description: 'The real server' })
+    await syncStep(DB, serve([entry('io.github.squatter/x', 'Visit evil.example again')]))
+    expect(stored()).toEqual({ registry_name: 'example.squat/mcp', description: 'The real server' })
+  })
+})
+
+describe('private reports', () => {
+  it('get a random link and expire', async () => {
+    const a = await savePrivateReport(DB, URL_, report({ authenticated: true }))
+    const b = await savePrivateReport(DB, URL_, report({ authenticated: true }))
+    expect(a.id).toMatch(/^[0-9a-f]{32}$/)
+    expect(a.id).not.toBe(b.id)
+    expect((await loadPrivateReport(DB, a.id))?.report.authenticated).toBe(true)
+    expect(await loadPrivateReport(DB, 'not-an-id')).toBeUndefined()
+    raw.prepare(`UPDATE private_reports SET created_at = '2020-01-01T00:00:00.000Z' WHERE id = ?`).run(a.id)
+    expect(await loadPrivateReport(DB, a.id)).toBeUndefined()
+  })
+})
+
+describe('webhook slots', () => {
+  const ok = (async () => new Response('ok')) as unknown as typeof fetch
+  it('one per visitor per server, and the owner can clear them all', async () => {
+    await subscribe(DB, ID, 'https://hooks.example.com/a', 'https://mcp.nischaldhakal.com.np', 'visitor-1', ok)
+    await expect(subscribe(DB, ID, 'https://hooks.example.com/b', 'https://mcp.nischaldhakal.com.np', 'visitor-1', ok)).rejects.toThrow(/already have a webhook/)
+    await subscribe(DB, ID, 'https://hooks.example.com/c', 'https://mcp.nischaldhakal.com.np', 'visitor-2', ok)
+    expect(await clearWebhooks(DB, ID)).toBe(2)
+    expect(raw.prepare(`SELECT COUNT(*) AS n FROM webhooks WHERE server_id = ?`).get(ID)).toEqual({ n: 0 })
   })
 })
