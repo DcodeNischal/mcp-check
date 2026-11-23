@@ -61,11 +61,15 @@ export function isPrivateIp(host: string): boolean {
       (a === 172 && b >= 16 && b <= 31) ||
       (a === 192 && b === 168) ||
       (a === 192 && b === 0) ||
-      (a === 198 && (b === 18 || b === 19))
+      (a === 198 && (b === 18 || b === 19)) ||
+      (a === 198 && b === 51 && Number(v4[3]) === 100) || // documentation ranges
+      (a === 203 && b === 0 && Number(v4[3]) === 113)
     )
   }
   // IPv6: loopback, unspecified, IPv4-compatible and IPv4-mapped (::/96, ::ffff:0:0/96), NAT64,
   // 6to4, unique-local, link-local, site-local and multicast.
+  // Also Teredo (2001:0::/32), documentation (2001:db8::/32) and discard-only (100::/64).
   return h === '::1' || h === '::' || /^::[0-9a-f]/.test(h) || h.startsWith('64:ff9b:') || h.startsWith('2002:') ||
+    /^2001:0*:/.test(h) || /^2001:db8:/.test(h) || /^100:0*:0*:0*:/.test(h) || h.startsWith('100::') ||
     /^f[cd]/.test(h) || /^fe[89a-f]/.test(h) || /^ff/.test(h)
 }

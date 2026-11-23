@@ -55,6 +55,11 @@ export async function discoverSignIn(url: string, fetchImpl?: typeof fetch): Pro
     throw new SignInError("This server's sign-in setup couldn't be found. Run a check to see which part is missing.")
   }
   if (!summary.pkceS256) throw new SignInError("This server's sign-in doesn't support PKCE (S256), which MCP requires, so MCP Check won't sign in.")
+  try {
+    new URL(summary.authorizationEndpoint)
+  } catch {
+    throw new SignInError("This server's sign-in page address isn't a valid URL.")
+  }
   if (!/^https:\/\//i.test(summary.authorizationEndpoint) || !isPublicHttps(summary.tokenEndpoint)) {
     throw new SignInError("This server's sign-in endpoints must be public https URLs.")
   }
@@ -162,7 +167,7 @@ export function authorizeUrl(auth: AuthSummary, client: Client, p: { redirectUri
 }
 
 /** Start a sign-in: returns the URL to send the visitor to, and the state that ties it to them. */
-export async function startSignIn(db: D1Database, url: string, origin: string, fetchImpl?: typeof fetch): Promise<{ authorizeUrl: string; state: string }> {
+export async function startSignIn(db: D1Database, url: string, origin: string, fetchImpl?: typeof fetch): Promise<{ authorizeUrl: string; state: string; issuer: string }> {
   await ensureSchema(db)
   const auth = await discoverSignIn(url, fetchImpl)
   const client = await clientFor(db, auth, origin, fetchImpl)
@@ -176,7 +181,7 @@ export async function startSignIn(db: D1Database, url: string, origin: string, f
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)`)
       .bind(state, url, auth.issuer, auth.tokenEndpoint, client.clientId, client.clientSecret ?? null, client.authMethod, redirectUri, verifier, resource, Date.now(), sameOriginEndpoints(auth) ? 0 : 1),
   ])
-  return { authorizeUrl: authorizeUrl(auth, client, { redirectUri, state, challenge: await pkceChallenge(verifier), resource }), state }
+  return { authorizeUrl: authorizeUrl(auth, client, { redirectUri, state, challenge: await pkceChallenge(verifier), resource }), state, issuer: auth.issuer! }
 }
 
 interface Pending {
@@ -237,6 +242,9 @@ export function parseTokenResponse(status: number, data: Record<string, unknown>
 export async function finishSignIn(db: D1Database, state: string, query: URLSearchParams, fetchImpl: typeof fetch = fetch): Promise<string | undefined> {
   const pending = await loadPending(db, state)
   if (!pending) return undefined
+  // Claim the sign-in: only the first callback is processed, so replaying it sends nothing anywhere.
+  const claim = await db.prepare(`UPDATE oauth_pending SET exchanging = 1 WHERE state = ?1 AND exchanging = 0`).bind(state).run()
+  if (!claim.meta.changes) return pending.server_url
   const fail = async (message: string) => {
     await db.prepare(`UPDATE oauth_pending SET error = ?2 WHERE state = ?1`).bind(state, message.slice(0, 300)).run()
     return pending.server_url

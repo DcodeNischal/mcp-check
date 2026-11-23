@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { checkTarget } from '../src/security/target'
-import { rateKey, targetKey } from '../src/worker/ratelimit'
+import { looksSecret } from '../src/security/secret-url'
+import { rateKey, rateKeys, targetKey } from '../src/worker/ratelimit'
 
 describe('rate-limit keys', () => {
   it('keys IPv6 visitors by their /64 and IPv4 by address', () => {
@@ -10,12 +11,16 @@ describe('rate-limit keys', () => {
     expect(rateKey('2001:db8::5')).toBe('2001:db8:0:0::/64')
     expect(rateKey(undefined)).toBe('unknown')
     expect(targetKey('https://Mcp.Example.com:443/mcp')).toBe('target:mcp.example.com')
+    expect(targetKey('https://mcp.example.com./mcp')).toBe('target:mcp.example.com')
+    expect(rateKeys('2001:db8:1:2::1')).toEqual(['2001:db8:1:2::/64', '2001:db8:1::/48'])
+    expect(rateKeys('203.0.113.7')).toEqual(['203.0.113.7'])
   })
 })
 
 describe('URL guard', () => {
   it('refuses IPv6 forms that hide private or special addresses', () => {
-    for (const url of ['https://[::127.0.0.1]/', 'https://[::7f00:1]/', 'https://[2002:a00::1]/', 'https://[fec0::1]/', 'https://[ff02::1]/']) {
+    for (const url of ['https://[::127.0.0.1]/', 'https://[::7f00:1]/', 'https://[2002:a00::1]/', 'https://[fec0::1]/', 'https://[ff02::1]/',
+      'https://[2001:0:4136:e378::1]/', 'https://[2001:db8::1]/', 'https://[100::1]/', 'https://198.51.100.7/', 'https://203.0.113.9/']) {
       expect(checkTarget(url).ok, url).toBe(false)
     }
     expect(checkTarget('https://[2606:4700::1]/').ok).toBe(true)
@@ -65,5 +70,27 @@ describe('registry namespaces and links', () => {
     expect(trustedRegistryLinks('io.github.attacker/x', 'https://mcp.victim.com/mcp', 'https://evil.example', 'https://github.com/attacker/x')).toEqual({ websiteUrl: null, repositoryUrl: 'https://github.com/attacker/x' })
     expect(trustedRegistryLinks('io.github.attacker/x', 'https://mcp.victim.com/mcp', 'https://victim.com', 'https://github.com/victim/x')).toEqual({ websiteUrl: 'https://victim.com', repositoryUrl: null })
     expect(trustedRegistryLinks('com.victim/mcp', 'https://mcp.victim.com/mcp', 'https://docs.example.org', 'https://gitlab.com/v/x')).toEqual({ websiteUrl: 'https://docs.example.org', repositoryUrl: 'https://gitlab.com/v/x' })
+  })
+})
+
+describe('secret-looking URLs', () => {
+  it('are spotted in the path', () => {
+    expect(looksSecret('https://mcp.example.com/s/a8F3kq92LmZx0PqR7tYv/mcp')).toBe(true)
+    expect(looksSecret('https://mcp.example.com/0b6f1c2e9d4a4f0e8c3b7a1d2e5f6a7b/mcp')).toBe(true)
+    expect(looksSecret('https://mcp.example.com/mcp')).toBe(false)
+    expect(looksSecret('https://mcp.example.com/v1/connectors/google-calendar/mcp')).toBe(false)
+  })
+})
+
+describe('CLI output', () => {
+  it('never lets server text start a new line (no workflow commands, no escapes)', async () => {
+    const { renderText } = await import('../cli/src/format')
+    const text = renderText({
+      url: 'https://x.example/mcp', checkedAt: '', durationMs: 1, connected: true, authenticated: false, version: 'x\n::stop-commands::t\u001b[2J',
+      steps: [], tools: [], prompts: [], resources: [], resourceTemplates: [], score: 50, grade: 'F',
+      checks: [{ id: 'a', category: 'tools', title: 'T\n::error::fake', status: 'fail', weight: 1, detail: 'd\r\n::add-mask::x', fix: 'f' }],
+    }, { color: false, verbose: false })
+    expect(text.split('\n').some((l) => l.trimStart().startsWith('::'))).toBe(false)
+    expect(text).not.toContain('\u001b')
   })
 })

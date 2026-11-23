@@ -7,13 +7,15 @@ import { runCheck } from '../checks/run'
 import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
 import { atomFeed, clearWebhooks, deliverPending, pruneEvents, recentEvents, subscribe, subscriberId, unsubscribe, WebhookError } from './alerts'
-import { loadPrivateReport, PRIVATE_ID, purgeExpiredPrivateReports, savePrivateReport } from './private'
-import { hasProof, markVerified, proofUrl, reconfirmOwner, type ProofAction } from './owners'
+import { loadPrivateReport, PRIVATE_ID, PrivateReportTooLarge, purgeExpiredPrivateReports, savePrivateReport } from './private'
+import { consumeChallenge, createChallenge, hasProof, hasProofLine, markVerified, proofUrl, reconfirmOwner, type ProofAction } from './owners'
 import { handleMcp, OWN_MCP_URL, OWN_ORIGIN, ownProofText } from './mcp-server'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, purgeExpiredSignIns, SignInError, startSignIn } from './oauth'
 import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, trustedRegistryLinks, type QueuedServer } from './registry'
 import { checksLeftToday, countCheck } from './budget'
-import { rateKey, targetKey } from './ratelimit'
+import { rateKey, targetKey, withinLimit } from './ratelimit'
+import { directoryPage, refreshSnapshotIfDue, sitemapEntries } from './directory'
+import { looksSecret } from '../security/secret-url'
 import { refreshStatsIfDue, storedStats } from './stats'
 import { backfillToolsText, embedPending, searchServers } from './search'
 import { blockServer, canonicalUrl, dueForRecheck, listedIds, listServers, loadGrade, loadReport, PAGE_SIZE, recordFailure, saveReport, serverId, serverUrl, signReport, touch, verifyReceipt } from './store'
@@ -35,11 +37,25 @@ export interface Env extends TurnstileEnv {
   SELF?: Fetcher
 }
 
-/** fetch for checks: requests to MCP Check's own hostname go through the SELF binding. */
-function checkFetch(env: Env): typeof fetch {
+/**
+ * fetch for checks: requests to MCP Check's own hostname go through the SELF binding. For checks a
+ * visitor starts (`target` given), every other host the check reaches (OAuth metadata, registration
+ * endpoints a server names) also counts against that host's limit, once per check, so nobody can use
+ * MCP Check to flood a host by naming it in their own server's metadata.
+ */
+function checkFetch(env: Env, target?: string): typeof fetch {
   const own = new URL(OWN_ORIGIN).host
-  return ((input: RequestInfo | URL, init?: RequestInit) => {
+  const charged = new Set(target ? [targetKey(target)] : [])
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url)
+    if (target) {
+      const key = targetKey(url.toString())
+      if (!charged.has(key)) {
+        charged.add(key)
+        const { success } = await env.CHECK_LIMITER.limit({ key })
+        if (!success) throw new Error(`${url.hostname} is getting too many requests from MCP Check right now`)
+      }
+    }
     return url.host === own && env.SELF ? env.SELF.fetch(new Request(input, init)) : fetch(input, init)
   }) as typeof fetch
 }
@@ -58,7 +74,7 @@ app.get('/api/health', (c) => c.json({ ok: true }))
 app.get('/.well-known/mcp-check.txt', async (c) => c.text(await ownProofText(), 200, { 'Cache-Control': 'public, max-age=3600' }))
 
 // MCP Check's own MCP server (see src/worker/mcp-server.ts).
-app.all('/mcp', (c) => handleMcp(c.req.raw, { env: c.env, ip: c.req.header('CF-Connecting-IP'), fetch: checkFetch(c.env) }))
+app.all('/mcp', (c) => handleMcp(c.req.raw, { env: c.env, ip: c.req.header('CF-Connecting-IP'), fetchFor: (target) => checkFetch(c.env, target) }))
 
 // Headers a visitor may pass through to the server they're checking (auth and custom API keys).
 const FORBIDDEN_HEADERS = new Set(['host', 'content-length', 'content-type', 'accept', 'origin', 'cookie', 'connection', 'transfer-encoding', 'mcp-session-id', 'mcp-protocol-version', 'mcp-method', 'mcp-name'])
@@ -89,8 +105,7 @@ type GuardResult = { fail: GuardFail } | { fail?: undefined; body: Record<string
 
 async function guard(c: { req: { url: string; header(n: string): string | undefined; json(): Promise<unknown> }; env: Env }, action: string): Promise<GuardResult> {
   const ip = c.req.header('CF-Connecting-IP')
-  const { success } = await c.env.CHECK_LIMITER.limit({ key: rateKey(ip) })
-  if (!success) return { fail: { status: 429, error: 'rate-limited', message: 'Too many requests from your network. Try again in a minute.' } }
+  if (!(await withinLimit(c.env.CHECK_LIMITER, ip))) return { fail: { status: 429, error: 'rate-limited', message: 'Too many requests from your network. Try again in a minute.' } }
 
   const body = (await c.req.json().catch(() => null)) as Record<string, unknown> | null
   if (!body || typeof body !== 'object' || typeof body.url !== 'string' || body.url.length > 2048) {
@@ -116,7 +131,7 @@ app.post('/api/check', async (c) => {
   const g = await guard(c, 'check')
   if (g.fail) return c.json({ ok: false, error: g.fail.error, message: g.fail.message }, g.fail.status)
   const log: Exchange[] = []
-  const report = await runCheck(g.body.url as string, { headers: g.headers, vantage: VANTAGE, logSink: log, fetch: checkFetch(c.env) })
+  const report = await runCheck(g.body.url as string, { headers: g.headers, vantage: VANTAGE, logSink: log, fetch: checkFetch(c.env, g.body.url as string) })
   // A signed copy the visitor can hand back to /api/share: proof this Worker produced the grade.
   const receipt = report.connected || report.auth ? await signReport(c.env.DB, report) : undefined
   return c.json({ ok: true, report, log: trimLog(log), receipt }, 200, { 'Cache-Control': 'no-store' })
@@ -128,7 +143,7 @@ app.post('/api/call', async (c) => {
   const { tool, arguments: args } = g.body as { tool?: unknown; arguments?: unknown }
   if (typeof tool !== 'string' || !tool || tool.length > 256) return c.json({ ok: false, error: 'bad-request', message: 'Send the tool name.' }, 400)
   if (args !== undefined && (!args || typeof args !== 'object' || Array.isArray(args))) return c.json({ ok: false, error: 'bad-request', message: 'Arguments must be an object.' }, 400)
-  const outcome = await runTool(g.body.url as string, tool, (args ?? {}) as Record<string, unknown>, { headers: g.headers, fetch: checkFetch(c.env) })
+  const outcome = await runTool(g.body.url as string, tool, (args ?? {}) as Record<string, unknown>, { headers: g.headers, fetch: checkFetch(c.env, g.body.url as string) })
   return c.json({ ...outcome, log: trimLog(outcome.log) }, 200, { 'Cache-Control': 'no-store' })
 })
 
@@ -143,9 +158,10 @@ app.post('/api/oauth/start', async (c) => {
   const target = checkTarget(url)
   if (!target.ok) return c.json({ ok: false, error: 'invalid', message: target.reason }, 400)
   try {
-    const { authorizeUrl, state } = await startSignIn(c.env.DB, url, new URL(c.req.url).origin)
+    const { authorizeUrl, state, issuer } = await startSignIn(c.env.DB, url, new URL(c.req.url).origin)
     setCookie(c, COOKIE, state, { httpOnly: true, secure: true, sameSite: 'Lax', path: '/', maxAge: PENDING_TTL_S, prefix: 'host' })
-    return c.json({ ok: true, authorizeUrl }, 200, { 'Cache-Control': 'no-store' })
+    // The page shows both hosts and asks before leaving: the token will go to the server being checked.
+    return c.json({ ok: true, authorizeUrl, signInHost: new URL(authorizeUrl).hostname, issuer, tokenGoesTo: new URL(url).hostname }, 200, { 'Cache-Control': 'no-store' })
   } catch (err) {
     if (err instanceof SignInError) return c.json({ ok: false, error: 'signin', message: err.message }, 400)
     throw err
@@ -159,6 +175,7 @@ app.get('/oauth/callback', async (c) => {
   const state = query.get('state') ?? ''
   const back = (url?: string) => c.redirect(`/?${new URLSearchParams({ ...(url ? { url } : {}), signin: '1' })}`, 303)
   if (!state || state !== getCookie(c, COOKIE, 'host')) return back()
+  if (!(await withinLimit(c.env.CHECK_LIMITER, c.req.header('CF-Connecting-IP'), 'callback'))) return back()
   return back(await finishSignIn(c.env.DB, state, query))
 })
 
@@ -173,9 +190,7 @@ app.post('/api/oauth/claim', async (c) => {
 })
 
 app.post('/api/share', async (c) => {
-  const ip = c.req.header('CF-Connecting-IP')
-  const { success } = await c.env.CHECK_LIMITER.limit({ key: rateKey(ip) })
-  if (!success) return c.json({ ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' }, 429)
+  if (!(await withinLimit(c.env.CHECK_LIMITER, c.req.header('CF-Connecting-IP')))) return c.json({ ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' }, 429)
   const body = (await c.req.json().catch(() => null)) as { receipt?: unknown; list?: unknown } | null
   const verified = await verifyReceipt(c.env.DB, body?.receipt)
   if (!verified.ok) return c.json({ ok: false, error: 'invalid', message: verified.reason }, 400)
@@ -185,12 +200,25 @@ app.post('/api/share', async (c) => {
   if (!canonical.ok) return c.json({ ok: false, error: 'invalid', message: canonical.reason }, 400)
   const origin = new URL(c.req.url).origin
   if (report.authenticated) {
-    const p = await savePrivateReport(c.env.DB, canonical.url, report)
-    return c.json({ ok: true, id: p.id, private: true, expiresAt: p.expiresAt, reportUrl: `${origin}/p/${p.id}`, listed: false, blocked: false, saved: true }, 200, { 'Cache-Control': 'no-store' })
+    try {
+      const sig = (body?.receipt as { sig: string }).sig
+      const p = await savePrivateReport(c.env.DB, canonical.url, report, sig)
+      return c.json({ ok: true, id: p.id, private: true, expiresAt: p.expiresAt, reportUrl: `${origin}/p/${p.id}`, listed: false, blocked: false, saved: true }, 200, { 'Cache-Control': 'no-store' })
+    } catch (err) {
+      if (err instanceof PrivateReportTooLarge) return c.json({ ok: false, error: 'invalid', message: err.message }, 400)
+      throw err
+    }
   }
+  // A public page belongs to the exact address it was checked at: a variant (like a trailing slash)
+  // that behaves differently can't replace the server's listing.
+  if (report.url.trim() !== canonical.url) {
+    return c.json({ ok: false, error: 'invalid', message: `To share a public report, check the server at ${canonical.url} exactly.` }, 400)
+  }
+  // URLs that look like they carry a secret in the path are never listed.
+  const secret = looksSecret(canonical.url)
   const id = await serverId(canonical.url)
-  const saved = await saveReport(c.env.DB, id, canonical.url, report, { list: body?.list === true })
-  return c.json({ ok: true, id, reportUrl: `${origin}/r/${id}`, badgeUrl: `${origin}/badge/${id}.svg`, listed: saved.listed, blocked: saved.blocked, saved: saved.saved })
+  const saved = await saveReport(c.env.DB, id, canonical.url, report, { list: body?.list === true && !secret })
+  return c.json({ ok: true, id, reportUrl: `${origin}/r/${id}`, badgeUrl: `${origin}/badge/${id}.svg`, listed: saved.listed, blocked: saved.blocked, saved: saved.saved, ...(secret ? { notListed: 'secret-url' } : {}) })
 })
 
 app.get('/api/report/:id', async (c) => {
@@ -213,13 +241,15 @@ app.get('/api/servers', async (c) => {
   const page = Math.min(1000, Math.max(1, Number.parseInt(c.req.query('page') ?? '1', 10) || 1))
   const gradeFilter = /^[ABCDF]$/.test(grade) ? { grade } : {}
   if (!search) {
-    // Cached at the edge for a minute: every view would otherwise count the whole directory.
+    // Pages come from the stored directory snapshot (about 30 rows read for any page), are cached at
+    // the edge for a minute under validated parameters only, and misses are rate-limited per visitor.
     const pageCache = (caches as unknown as { default: Cache }).default
-    const pageKey = new Request(new URL(`/api/servers?${new URLSearchParams({ sort: sortParam === 'recent' ? 'recent' : 'grade', page: String(page), grade })}`, c.req.url))
+    const sort = sortParam === 'recent' ? 'recent' : 'grade'
+    const pageKey = new Request(new URL(`/api/servers?${new URLSearchParams({ sort, page: String(page), grade: gradeFilter.grade ?? '' })}`, c.req.url))
     const cached = await pageCache.match(pageKey)
     if (cached) return cached
-    const sort = sortParam === 'recent' ? 'recent' : 'grade'
-    const result = await listServers(c.env.DB, { sort, page, pinnedUrl: OWN_MCP_URL, ...gradeFilter })
+    if (!(await withinLimit(c.env.CHECK_LIMITER, c.req.header('CF-Connecting-IP'), 'list'))) return c.json({ ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' }, 429)
+    const result = await directoryPage(c.env.DB, { sort, page, pageSize: PAGE_SIZE, pinnedUrl: OWN_MCP_URL, ...gradeFilter })
     const res = c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
     c.executionCtx.waitUntil(pageCache.put(pageKey, res.clone()))
     return res
@@ -231,8 +261,7 @@ app.get('/api/servers', async (c) => {
   const key = new Request(new URL(`/api/servers?${new URLSearchParams({ q: search.toLowerCase(), sort: sortParam ?? '', page: String(page), grade })}`, c.req.url))
   const hit = await cache.match(key)
   if (hit) return hit
-  const limited = await c.env.CHECK_LIMITER.limit({ key: `search:${rateKey(c.req.header('CF-Connecting-IP'))}` })
-  if (!limited.success) return c.json({ ok: false, error: 'rate-limited', message: 'Too many searches. Try again in a minute.' }, 429)
+  if (!(await withinLimit(c.env.CHECK_LIMITER, c.req.header('CF-Connecting-IP'), 'search'))) return c.json({ ok: false, error: 'rate-limited', message: 'Too many searches. Try again in a minute.' }, 429)
   const sort = sortParam === 'recent' || sortParam === 'grade' ? sortParam : 'relevance'
   const result = await searchServers(c.env, { search, sort, page, pageSize: PAGE_SIZE, pinnedUrl: OWN_MCP_URL, ...gradeFilter })
   const res = c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
@@ -244,9 +273,7 @@ app.get('/api/servers', async (c) => {
 // /.well-known/mcp-check.txt containing "mcp-check: verify <id>" or "mcp-check: remove <id>".
 async function ownerAction(c: { req: { header(n: string): string | undefined; json(): Promise<unknown> }; env: Env }, action: ProofAction) {
   // checkFetch: the proof file may be on this Worker's own domain (MCP Check's own server).
-  const ip = c.req.header('CF-Connecting-IP')
-  const { success } = await c.env.CHECK_LIMITER.limit({ key: rateKey(ip) })
-  if (!success) return { status: 429 as const, body: { ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' } }
+  if (!(await withinLimit(c.env.CHECK_LIMITER, c.req.header('CF-Connecting-IP')))) return { status: 429 as const, body: { ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' } }
   const body = (await c.req.json().catch(() => null)) as { id?: unknown } | null
   const id = typeof body?.id === 'string' ? body.id : ''
   const url = ID.test(id) ? await serverUrl(c.env.DB, id) : undefined
@@ -266,11 +293,26 @@ app.post('/api/unlist', async (c) => {
 })
 
 // A verified owner (the same proof) removes every webhook on their server.
+// A server's owner removes every webhook on it. A permanent proof line isn't enough (anyone could
+// repeat it), so this takes a one-time code: ask for one, serve "mcp-check: clear-alerts <id> <code>",
+// then send the code back.
 app.post('/api/owner/clear-alerts', async (c) => {
-  const r = await ownerAction(c, 'verify')
-  if (r.status !== 200) return c.json(r.body, r.status)
-  const removed = await clearWebhooks(c.env.DB, r.id)
-  return c.json({ ok: true, removed, message: removed ? `Removed ${removed} webhook${removed === 1 ? '' : 's'}.` : 'There were no webhooks on this server.' })
+  if (!(await withinLimit(c.env.CHECK_LIMITER, c.req.header('CF-Connecting-IP')))) return c.json({ ok: false, error: 'rate-limited', message: 'Too many requests. Try again in a minute.' }, 429)
+  const body = (await c.req.json().catch(() => null)) as { id?: unknown; code?: unknown } | null
+  const id = typeof body?.id === 'string' ? body.id : ''
+  const url = ID.test(id) ? await serverUrl(c.env.DB, id) : undefined
+  if (!url) return c.json({ ok: false, error: 'not-found', message: 'No server with this id.' }, 404)
+  if (typeof body?.code !== 'string') {
+    const challenge = await createChallenge(c.env.DB, id)
+    return c.json({ ok: true, step: 'serve', code: challenge.nonce, line: challenge.line, proofUrl: proofUrl(url) }, 200, { 'Cache-Control': 'no-store' })
+  }
+  const line = `mcp-check: clear-alerts ${id} ${body.code}`
+  if (!(await hasProofLine(url, line, checkFetch(c.env)))) {
+    return c.json({ ok: false, error: 'unverified', message: `Couldn't find "${line}" at ${proofUrl(url)}.` }, 400)
+  }
+  if (!(await consumeChallenge(c.env.DB, id, body.code))) return c.json({ ok: false, error: 'expired', message: 'That code was already used or has expired. Ask for a new one.' }, 400)
+  const removed = await clearWebhooks(c.env.DB, id)
+  return c.json({ ok: true, step: 'done', removed, message: removed ? `Removed ${removed} webhook${removed === 1 ? '' : 's'}. You can take the line down now.` : 'There were no webhooks on this server.' })
 })
 
 // Verification: the server page shows a verified-owner badge while the proof stays up.
@@ -360,15 +402,23 @@ app.post('/api/webhooks/:hook/delete', async (c) => {
 })
 
 app.get('/sitemap.xml', async (c) => {
+  const cache = (caches as unknown as { default: Cache }).default
+  const key = new Request(new URL('/sitemap.xml', c.req.url))
+  const hit = await cache.match(key)
+  if (hit) return hit
   const origin = new URL(c.req.url).origin
-  const servers = await listedIds(c.env.DB)
+  const servers = await sitemapEntries(c.env.DB, OWN_MCP_URL)
+  const ownId = await serverId(OWN_MCP_URL)
   const urls = [
     `<url><loc>${origin}/</loc></url>`,
     `<url><loc>${origin}/servers</loc></url>`,
-    ...servers.map((s) => `<url><loc>${origin}/r/${s.id}</loc><lastmod>${s.checked_at.slice(0, 10)}</lastmod></url>`),
+    `<url><loc>${origin}/r/${ownId}</loc></url>`,
+    ...servers.map((s) => `<url><loc>${origin}/r/${s.id}</loc><lastmod>${s.date}</lastmod></url>`),
   ]
   const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls.join('\n')}\n</urlset>\n`
-  return c.body(xml, 200, { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=3600' })
+  const res = c.body(xml, 200, { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=3600' })
+  c.executionCtx.waitUntil(cache.put(key, res.clone()))
+  return res
 })
 
 app.get('/servers', async (c) => {
@@ -457,6 +507,7 @@ async function tick(env: Env) {
     (err) => console.error('embedding failed', String(err)),
   )
   await refreshStatsIfDue(env.DB).catch((err) => console.error('stats failed', String(err)))
+  await refreshSnapshotIfDue(env.DB, OWN_MCP_URL).catch((err) => console.error('directory snapshot failed', String(err)))
   await purgeExpiredSignIns(env.DB).catch((err) => console.error('sign-in purge failed', String(err)))
   await purgeExpiredPrivateReports(env.DB).catch((err) => console.error('private report purge failed', String(err)))
   await checkOwnServer(env).catch((err) => console.error('own server check failed', String(err)))

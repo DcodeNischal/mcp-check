@@ -6,8 +6,10 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import type { Report } from '../src/checks/types'
 import { checksLeftToday, countCheck, DAILY_CHECK_BUDGET } from '../src/worker/budget'
 import { clearWebhooks, subscribe } from '../src/worker/alerts'
+import { finishSignIn } from '../src/worker/oauth'
+import { consumeChallenge, createChallenge } from '../src/worker/owners'
 import { loadPrivateReport, savePrivateReport } from '../src/worker/private'
-import { syncStep } from '../src/worker/registry'
+import { nextCandidates, syncStep } from '../src/worker/registry'
 import { saveReport, serverId } from '../src/worker/store'
 
 /** Just enough of the D1 API over node:sqlite for the code under test. */
@@ -172,17 +174,88 @@ describe('registry entries that name the same server', () => {
 })
 
 describe('private reports', () => {
-  it('get a random link and expire', async () => {
-    const a = await savePrivateReport(DB, URL_, report({ authenticated: true }))
-    const b = await savePrivateReport(DB, URL_, report({ authenticated: true }))
+  it('get an unguessable link, the same one for the same receipt, and expire', async () => {
+    const a = await savePrivateReport(DB, URL_, report({ authenticated: true }), 'sig-a')
+    const b = await savePrivateReport(DB, URL_, report({ authenticated: true }), 'sig-b')
     expect(a.id).toMatch(/^[0-9a-f]{32}$/)
     expect(a.id).not.toBe(b.id)
+    // Sharing the same receipt again (a replay) returns the same link and writes nothing.
+    let again: { id: string } | undefined
+    expect(await rowsWritten(async () => (again = await savePrivateReport(DB, URL_, report({ authenticated: true }), 'sig-a')))).toBe(0)
+    expect(again?.id).toBe(a.id)
     expect((await loadPrivateReport(DB, a.id))?.report.authenticated).toBe(true)
     expect(await loadPrivateReport(DB, 'not-an-id')).toBeUndefined()
     raw.prepare(`UPDATE private_reports SET created_at = '2020-01-01T00:00:00.000Z' WHERE id = ?`).run(a.id)
     expect(await loadPrivateReport(DB, a.id)).toBeUndefined()
   })
+
+  it('refuses reports too large to store', async () => {
+    // Random tool names don't compress, so this is well over the cap once gzipped.
+    const tools = Array.from({ length: 4000 }, () => ({ name: crypto.randomUUID() + crypto.randomUUID(), description: crypto.randomUUID().repeat(3) }))
+    await expect(savePrivateReport(DB, URL_, report({ authenticated: true, tools }), 'sig-big')).rejects.toThrow(/too large/)
+  })
 })
+
+describe('OAuth callback', () => {
+  it('exchanges a code at most once, however often the callback is replayed', async () => {
+    raw.prepare(`INSERT INTO oauth_pending (state, server_url, issuer, token_endpoint, client_id, auth_method, redirect_uri, verifier, resource, created_at)
+                 VALUES ('state-1', ?, 'https://auth.example.com', 'https://auth.example.com/token', 'cid', 'none', 'https://mcp.nischaldhakal.com.np/oauth/callback', 'v', ?, ?)`).run(URL_, URL_, Date.now())
+    let calls = 0
+    const tokenEndpoint = (async () => {
+      calls++
+      return new Response(JSON.stringify({ access_token: 't', token_type: 'Bearer' }), { headers: { 'content-type': 'application/json' } })
+    }) as unknown as typeof fetch
+    const query = new URLSearchParams({ state: 'state-1', code: 'c', iss: 'https://auth.example.com' })
+    for (let i = 0; i < 5; i++) await finishSignIn(DB, 'state-1', query, tokenEndpoint)
+    expect(calls).toBe(1)
+  })
+})
+
+describe('owner challenges', () => {
+  it('work once, for the server they were issued for', async () => {
+    const c = await createChallenge(DB, ID)
+    expect(c.line).toBe(`mcp-check: clear-alerts ${ID} ${c.nonce}`)
+    expect(await consumeChallenge(DB, 'otherserver12', c.nonce)).toBe(false)
+    expect(await consumeChallenge(DB, ID, c.nonce)).toBe(true)
+    expect(await consumeChallenge(DB, ID, c.nonce)).toBe(false)
+  })
+})
+
+describe('registry entries that both lack proof', () => {
+  const entry = (name: string, description: string) => ({
+    server: { name, title: name, description, version: '1.0.0', remotes: [{ type: 'streamable-http', url: 'https://mcp.contested.example/mcp' }] },
+    _meta: { 'io.modelcontextprotocol.registry/official': { status: 'active', isLatest: true } },
+  })
+  const serve = (servers: unknown[]) => (async () => new Response(JSON.stringify({ servers, metadata: {} }), { headers: { 'content-type': 'application/json' } })) as unknown as typeof fetch
+
+  it('are marked contested, and queued checks get none of their details', async () => {
+    await syncStep(DB, serve([entry('io.github.first/x', 'First claim')]))
+    await syncStep(DB, serve([entry('io.github.second/x', 'Second claim')]))
+    expect(raw.prepare(`SELECT registry_name, contested FROM registry WHERE url = 'https://mcp.contested.example/mcp'`).get()).toEqual({ registry_name: 'io.github.first/x', contested: 1 })
+    // Repeating both doesn't write again.
+    expect(await rowsWritten(() => syncStep(DB, serve([entry('io.github.first/x', 'First claim'), entry('io.github.second/x', 'Second claim')])))).toBeLessThanOrEqual(2)
+    const queued = (await nextCandidates(DB, 10)).find((c) => c.url === 'https://mcp.contested.example/mcp')
+    expect(queued).toMatchObject({ registryName: null, description: null })
+  })
+})
+
+describe('directory pages', () => {
+  it('come from the snapshot, with the pinned server first', async () => {
+    const { directoryPage, refreshSnapshot } = await import('../src/worker/directory')
+    for (let i = 0; i < 5; i++) {
+      const url = `https://s${i}.example.com/mcp`
+      await saveReport(DB, await serverId(url), url, report({ url, score: 90 + i, checkedAt: `2026-12-0${i + 1}T00:00:00.000Z` }), { list: true })
+    }
+    await refreshSnapshot(DB, URL_)
+    const page1 = await directoryPage(DB, { sort: 'grade', page: 1, pageSize: 2, pinnedUrl: URL_ })
+    expect(page1.servers[0]?.url).toBe(URL_)
+    expect(page1.servers.slice(1).map((s) => s.score)).toEqual([94, 93])
+    expect(page1.total).toBe(6)
+    const recent = await directoryPage(DB, { sort: 'recent', page: 2, pageSize: 2, pinnedUrl: URL_ })
+    expect(recent.servers.map((s) => s.url)).toEqual(['https://s2.example.com/mcp', 'https://s1.example.com/mcp'])
+  })
+})
+
 
 describe('webhook slots', () => {
   const ok = (async () => new Response('ok')) as unknown as typeof fetch
@@ -192,5 +265,20 @@ describe('webhook slots', () => {
     await subscribe(DB, ID, 'https://hooks.example.com/c', 'https://mcp.nischaldhakal.com.np', 'visitor-2', ok)
     expect(await clearWebhooks(DB, ID)).toBe(2)
     expect(raw.prepare(`SELECT COUNT(*) AS n FROM webhooks WHERE server_id = ?`).get(ID)).toEqual({ n: 0 })
+  })
+})
+
+describe('webhook slot race', () => {
+  it('two parallel requests from one visitor get one webhook', async () => {
+    const slowOk = (async () => {
+      await new Promise((r) => setTimeout(r, 50))
+      return new Response('ok')
+    }) as unknown as typeof fetch
+    const results = await Promise.allSettled([
+      subscribe(DB, ID, 'https://hooks.example.com/r1', 'https://mcp.nischaldhakal.com.np', 'racer', slowOk),
+      subscribe(DB, ID, 'https://hooks.example.com/r2', 'https://mcp.nischaldhakal.com.np', 'racer', slowOk),
+    ])
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+    expect(raw.prepare(`SELECT COUNT(*) AS n FROM webhooks WHERE server_id = ? AND subscriber = 'racer'`).get(ID)).toEqual({ n: 1 })
   })
 })

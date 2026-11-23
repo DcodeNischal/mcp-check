@@ -63,8 +63,14 @@ const canSignIn = computed(() => {
 async function onSignIn(url: string, token: string) {
   error.value = ''
   try {
-    const { authorizeUrl } = await startSignIn(url, token)
-    location.assign(authorizeUrl)
+    const s = await startSignIn(url, token)
+    // Say plainly where the sign-in happens and who gets the token, before leaving the page.
+    const ok = window.confirm(
+      `You'll sign in at ${s.signInHost} (authorization server ${s.issuer}).\n\n` +
+        `MCP Check will then send the token you get to ${s.tokenGoesTo} to check it.\n\n` +
+        `Only continue if you trust ${s.tokenGoesTo} with that account.`,
+    )
+    if (ok) location.assign(s.authorizeUrl)
   } catch (err) {
     error.value = err instanceof ApiError ? err.message : 'Sign-in could not be started. Please try again.'
   }

@@ -622,9 +622,10 @@ function isPrivateIp(host) {
     const [a, b] = [Number(v4[1]), Number(v4[2])];
     return a === 0 || a === 10 || a === 127 || a >= 224 || a === 100 && b >= 64 && b <= 127 || // carrier-grade NAT
     a === 169 && b === 254 || // link-local, cloud metadata
-    a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 192 && b === 0 || a === 198 && (b === 18 || b === 19);
+    a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 192 && b === 0 || a === 198 && (b === 18 || b === 19) || a === 198 && b === 51 && Number(v4[3]) === 100 || // documentation ranges
+    a === 203 && b === 0 && Number(v4[3]) === 113;
   }
-  return h === "::1" || h === "::" || /^::[0-9a-f]/.test(h) || h.startsWith("64:ff9b:") || h.startsWith("2002:") || /^f[cd]/.test(h) || /^fe[89a-f]/.test(h) || /^ff/.test(h);
+  return h === "::1" || h === "::" || /^::[0-9a-f]/.test(h) || h.startsWith("64:ff9b:") || h.startsWith("2002:") || /^2001:0*:/.test(h) || /^2001:db8:/.test(h) || /^100:0*:0*:0*:/.test(h) || h.startsWith("100::") || /^f[cd]/.test(h) || /^fe[89a-f]/.test(h) || /^ff/.test(h);
 }
 
 // src/checks/auth.ts
@@ -1186,20 +1187,20 @@ var STATUS_ORDER = { fail: 0, warn: 1, info: 2, pass: 3, skip: 4 };
 function webLink(url) {
   return checkTarget(url).ok ? `${WEB}/?url=${encodeURIComponent(url)}` : void 0;
 }
+var safe = (s) => (s ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 function summaryLine(report) {
   const parts = [
     report.version && `spec ${report.version}${report.era ? ` (${ERA_LABEL[report.era] ?? report.era})` : ""}`,
     report.connected && !report.partial && `${report.tools.length} tool${report.tools.length === 1 ? "" : "s"}`,
     `checked in ${(report.durationMs / 1e3).toFixed(1)}s`
   ];
-  return parts.filter(Boolean).join(" \xB7 ");
+  return safe(parts.filter(Boolean).join(" \xB7 "));
 }
 function counts(checks) {
   const n = (s) => checks.filter((c) => c.status === s).length;
   return { pass: n("pass"), warn: n("warn"), fail: n("fail") };
 }
 var sorted = (checks) => [...checks].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category));
-var safe = (s) => (s ?? "").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
 function renderText(report, o, v) {
   const paint = (code) => (s) => o.color ? `\x1B[${code}m${s}\x1B[0m` : s;
   const bold = paint("1");
@@ -1226,7 +1227,7 @@ function renderText(report, o, v) {
   const link = webLink(report.url);
   if (link) out.push(`  ${dim("On the web:")} ${link}`);
   out.push("");
-  if (v && v.message !== "Done.") out.push(v.exitCode === 0 ? tone.pass(v.message) : tone.fail(v.message), "");
+  if (v && v.message !== "Done.") out.push(v.exitCode === 0 ? tone.pass(safe(v.message)) : tone.fail(safe(v.message)), "");
   return out.join("\n");
 }
 var cell = (s) => s.replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>");

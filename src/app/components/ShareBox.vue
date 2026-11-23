@@ -15,9 +15,10 @@
         <button type="button" :disabled="busy" class="rounded-lg bg-white px-4 py-2 text-sm text-black disabled:opacity-60 cursor-pointer" @click="share">
           {{ busy ? 'Sharing…' : report.authenticated ? 'Get a private link' : 'Share report' }}
         </button>
-        <label v-if="!report.authenticated" class="flex items-center gap-2 text-xs text-silver">
+        <label v-if="!report.authenticated && !secretUrl" class="flex items-center gap-2 text-xs text-silver">
           <input v-model="list" type="checkbox" /> List in the public directory
         </label>
+        <p v-else-if="!report.authenticated" class="max-w-xs text-right text-xs text-amber-300">This URL looks like it contains a secret, so it won't be listed. Anyone with the link can still see it.</p>
       </div>
     </div>
 
@@ -47,13 +48,16 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ApiError, shareReport, type Receipt, type Report } from '../api'
+import { looksSecret } from '../../security/secret-url'
 
 const props = defineProps<{ report: Report; receipt: Receipt }>()
 const busy = ref(false)
 const error = ref('')
 const copied = ref('')
 const shared = ref<{ reportUrl: string; badgeUrl?: string; listed: boolean; blocked: boolean; kept: boolean; private: boolean } | null>(null)
-const list = ref(true)
+// URLs that look like they carry a secret in the path aren't listed (the server refuses too).
+const secretUrl = looksSecret(props.report.url)
+const list = ref(!secretUrl)
 
 const links = computed(() =>
   shared.value

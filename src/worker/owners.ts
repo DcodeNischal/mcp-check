@@ -36,6 +36,9 @@ export function proofMatches(text: string, id: string, action: ProofAction): boo
  */
 export async function markVerified(db: D1Database, id: string): Promise<{ at: string; relisted: boolean }> {
   await ensureSchema(db)
+  // Already verified and listed: nothing to write (anyone can repeat the request while the line is up).
+  const current = await db.prepare(`SELECT owner_verified_at, blocked FROM servers WHERE id = ?1`).bind(id).first<{ owner_verified_at: string | null; blocked: number }>()
+  if (current?.owner_verified_at && !current.blocked) return { at: current.owner_verified_at, relisted: false }
   const at = new Date().toISOString()
   // One transaction: read the row as it was, then update it.
   const [before] = await db.batch<{ blocked: number; authenticated: number }>([
@@ -48,6 +51,43 @@ export async function markVerified(db: D1Database, id: string): Promise<{ at: st
   ])
   const row = before?.results?.[0]
   return { at, relisted: !!row && row.blocked === 1 && row.authenticated === 0 }
+}
+
+/** Does the proof file contain this exact line (for one-time codes)? */
+export async function hasProofLine(serverUrl: string, line: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  const url = proofUrl(serverUrl)
+  if (!checkTarget(url).ok) return false
+  try {
+    const res = await fetchImpl(url, { headers: { 'User-Agent': USER_AGENT }, redirect: 'manual', signal: AbortSignal.timeout(10_000) })
+    const text = res.ok ? (await res.text()).slice(0, 4096) : ''
+    return text.split(/\r?\n/).some((l) => l.trim().replace(/\s+/g, ' ') === line)
+  } catch {
+    return false
+  }
+}
+
+const CHALLENGE_TTL_MS = 60 * 60 * 1000
+
+/** A one-time code the owner must serve to clear the server's webhooks, so nobody else can. */
+export async function createChallenge(db: D1Database, serverId: string): Promise<{ nonce: string; line: string }> {
+  await ensureSchema(db)
+  const nonce = crypto.randomUUID().replace(/-/g, '')
+  await db.batch([
+    db.prepare(`DELETE FROM owner_challenges WHERE created_at < ?1`).bind(new Date(Date.now() - CHALLENGE_TTL_MS).toISOString()),
+    db.prepare(`INSERT INTO owner_challenges (nonce, server_id, action, created_at) VALUES (?1, ?2, 'clear-alerts', ?3)`).bind(nonce, serverId, new Date().toISOString()),
+  ])
+  return { nonce, line: `mcp-check: clear-alerts ${serverId} ${nonce}` }
+}
+
+/** Use up a challenge: true if it's valid for this server and wasn't used before. */
+export async function consumeChallenge(db: D1Database, serverId: string, nonce: string): Promise<boolean> {
+  if (!/^[0-9a-f]{32}$/.test(nonce)) return false
+  await ensureSchema(db)
+  const { meta } = await db
+    .prepare(`DELETE FROM owner_challenges WHERE nonce = ?1 AND server_id = ?2 AND action = 'clear-alerts' AND created_at >= ?3`)
+    .bind(nonce, serverId, new Date(Date.now() - CHALLENGE_TTL_MS).toISOString())
+    .run()
+  return meta.changes > 0
 }
 
 /** At a weekly re-check: keep the verified mark only while the proof is still served. */

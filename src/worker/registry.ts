@@ -201,17 +201,30 @@ async function syncPage(db: D1Database, fetchImpl: typeof fetch): Promise<{ adde
       // and the stored one's doesn't. The same entry is only rewritten when it changed.
       db.prepare(`INSERT INTO registry (url, id, host, registry_name, title, description, version, repository_url, website_url, first_seen_at, last_seen_at, ns_match)
                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)
-                  ON CONFLICT (url) DO UPDATE SET registry_name = ?4, title = ?5, description = ?6, version = ?7, repository_url = ?8, website_url = ?9, last_seen_at = ?10, ns_match = ?11
+                  ON CONFLICT (url) DO UPDATE SET
+                    registry_name = CASE WHEN registry.registry_name = ?4 OR (?11 = 1 AND registry.ns_match = 0) THEN ?4 ELSE registry.registry_name END,
+                    title = CASE WHEN registry.registry_name = ?4 OR (?11 = 1 AND registry.ns_match = 0) THEN ?5 ELSE registry.title END,
+                    description = CASE WHEN registry.registry_name = ?4 OR (?11 = 1 AND registry.ns_match = 0) THEN ?6 ELSE registry.description END,
+                    version = CASE WHEN registry.registry_name = ?4 OR (?11 = 1 AND registry.ns_match = 0) THEN ?7 ELSE registry.version END,
+                    repository_url = CASE WHEN registry.registry_name = ?4 OR (?11 = 1 AND registry.ns_match = 0) THEN ?8 ELSE registry.repository_url END,
+                    website_url = CASE WHEN registry.registry_name = ?4 OR (?11 = 1 AND registry.ns_match = 0) THEN ?9 ELSE registry.website_url END,
+                    ns_match = CASE WHEN registry.registry_name = ?4 OR (?11 = 1 AND registry.ns_match = 0) THEN ?11 ELSE registry.ns_match END,
+                    -- A proven owner settles it; two unproven claimants make it contested.
+                    contested = CASE WHEN registry.registry_name != ?4 AND ?11 = 1 AND registry.ns_match = 0 THEN 0
+                                     WHEN registry.registry_name != ?4 AND ?11 = 0 AND registry.ns_match = 0 THEN 1 ELSE registry.contested END,
+                    last_seen_at = ?10
                   WHERE (registry.registry_name = ?4 AND (registry.title IS NOT ?5 OR registry.description IS NOT ?6 OR registry.version IS NOT ?7
                           OR registry.repository_url IS NOT ?8 OR registry.website_url IS NOT ?9))
-                     OR (registry.registry_name != ?4 AND ?11 = 1 AND registry.ns_match = 0)`)
+                     OR (registry.registry_name != ?4 AND ?11 = 1 AND registry.ns_match = 0)
+                     OR (registry.registry_name != ?4 AND ?11 = 0 AND registry.ns_match = 0 AND registry.contested = 0)`)
         .bind(c.url, id, c.host, c.registryName, c.title, c.description, c.version, c.repositoryUrl, c.websiteUrl, now, nsMatchesHost(c.registryName, c.host) ? 1 : 0),
       // Listed servers mirror whichever entry owns their URL, written only when it changed.
-      db.prepare(`UPDATE servers SET registry_name = r.registry_name, description = r.description, repository_url = r.repository_url, website_url = r.website_url
+      db.prepare(`UPDATE servers SET registry_name = IIF(r.contested = 1, NULL, r.registry_name), description = IIF(r.contested = 1, NULL, r.description),
+                    repository_url = IIF(r.contested = 1, NULL, r.repository_url), website_url = IIF(r.contested = 1, NULL, r.website_url)
                   FROM registry r
                   WHERE r.url = ?1 AND servers.id = r.id
-                    AND (servers.registry_name IS NOT r.registry_name OR servers.description IS NOT r.description
-                      OR servers.repository_url IS NOT r.repository_url OR servers.website_url IS NOT r.website_url)`)
+                    AND (servers.registry_name IS NOT IIF(r.contested = 1, NULL, r.registry_name) OR servers.description IS NOT IIF(r.contested = 1, NULL, r.description)
+                      OR servers.repository_url IS NOT IIF(r.contested = 1, NULL, r.repository_url) OR servers.website_url IS NOT IIF(r.contested = 1, NULL, r.website_url))`)
         .bind(c.url),
     )
   }
@@ -246,7 +259,8 @@ export async function nextCandidates(db: D1Database, count: number): Promise<Que
   const lastHost = ''
   const retryBefore = retryCutoff()
   const { results } = await db
-    .prepare(`SELECT r.url, r.id, r.host, r.registry_name, r.title, r.description, r.version, r.repository_url, r.website_url, r.attempts
+    .prepare(`SELECT r.url, r.id, r.host, IIF(r.contested = 1, NULL, r.registry_name) AS registry_name, r.title, IIF(r.contested = 1, NULL, r.description) AS description,
+                     r.version, IIF(r.contested = 1, NULL, r.repository_url) AS repository_url, IIF(r.contested = 1, NULL, r.website_url) AS website_url, r.attempts
               FROM registry r LEFT JOIN servers s ON s.id = r.id
               WHERE r.status = 'pending' AND (r.last_attempt_at IS NULL OR r.last_attempt_at < ?1)
                 AND (s.id IS NULL OR s.blocked = 0)

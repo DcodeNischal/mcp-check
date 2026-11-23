@@ -27,10 +27,17 @@
         </div>
       </div>
       <p v-if="message" role="status" :class="ok ? 'text-emerald-300' : 'text-rose-300'">{{ message }}</p>
-      <p>
-        Unwanted alerts on your server? With the verify line in place,
-        <button type="button" :disabled="busy !== ''" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white disabled:opacity-50 cursor-pointer" @click="run('clear')">{{ busy === 'clear' ? 'checking…' : 'remove every webhook on it' }}</button>.
-      </p>
+      <div class="space-y-2">
+        <p>
+          Unwanted alerts on your server?
+          <button v-if="!clearLine" type="button" :disabled="busy !== ''" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white disabled:opacity-50 cursor-pointer" @click="run('clear')">{{ busy === 'clear' ? 'getting a code…' : 'Remove every webhook on it' }}</button>
+          <template v-else>Add this line to the same file (it works once, for an hour), then confirm:</template>
+        </p>
+        <template v-if="clearLine">
+          <pre class="overflow-x-auto rounded bg-black/40 p-3 font-mono text-white/90">{{ clearLine }}</pre>
+          <button type="button" :disabled="busy !== ''" class="rounded-lg border border-white/15 px-3 py-1.5 text-white hover:bg-white/5 disabled:opacity-50 cursor-pointer" @click="run('clear')">{{ busy === 'clear' ? 'Checking…' : 'Verify and remove webhooks' }}</button>
+        </template>
+      </div>
 
       <!-- For the owner who just verified: the one moment charging for their tools is relevant. -->
       <div v-if="justVerified" class="rounded-xl border border-emerald-400/25 bg-emerald-400/[0.05] p-4">
@@ -61,6 +68,8 @@ const busy = ref<'' | 'verify' | 'remove' | 'clear'>('')
 const message = ref('')
 const ok = ref(false)
 const justVerified = ref(false)
+const clearCode = ref('')
+const clearLine = ref('')
 
 const proofUrl = computed(() => {
   try {
@@ -84,7 +93,16 @@ async function run(action: 'verify' | 'remove' | 'clear') {
       emit('verified', res.verifiedAt, res.relisted)
       message.value = res.message
     } else if (action === 'clear') {
-      message.value = (await clearAlerts(props.id)).message
+      const res = await clearAlerts(props.id, clearCode.value || undefined)
+      if (res.step === 'serve') {
+        clearCode.value = res.code ?? ''
+        clearLine.value = res.line ?? ''
+        message.value = ''
+      } else {
+        clearCode.value = ''
+        clearLine.value = ''
+        message.value = res.message ?? ''
+      }
     } else {
       const res = await unlistServer(props.id)
       emit('removed')

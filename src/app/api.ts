@@ -39,13 +39,14 @@ export const checkServer = (target: Target, token: string) =>
   post<{ ok: true; report: Report; log: Exchange[]; receipt?: Receipt }>('/api/check', { ...target, token })
 
 /** Start an OAuth sign-in: the browser should go to the returned URL. */
-export const startSignIn = (url: string, token: string) => post<{ ok: true; authorizeUrl: string }>('/api/oauth/start', { url, token })
+export const startSignIn = (url: string, token: string) =>
+  post<{ ok: true; authorizeUrl: string; signInHost: string; issuer: string; tokenGoesTo: string }>('/api/oauth/start', { url, token })
 
 /** After the sign-in comes back: fetch the access token, once. */
 export const claimSignIn = () => post<{ ok: true; url: string; accessToken: string; expiresIn?: number; scope?: string }>('/api/oauth/claim', {})
 
 export const shareReport = (receipt: Receipt, list: boolean) =>
-  post<{ ok: true; id: string; reportUrl: string; badgeUrl?: string; listed: boolean; blocked: boolean; saved?: boolean; private?: boolean; expiresAt?: string }>('/api/share', { receipt, list })
+  post<{ ok: true; id: string; reportUrl: string; badgeUrl?: string; listed: boolean; blocked: boolean; saved?: boolean; private?: boolean; expiresAt?: string; notListed?: string }>('/api/share', { receipt, list })
 
 export async function getPrivateReport(id: string): Promise<{ report: Report; expiresAt: string } | null> {
   const res = await fetch(`/api/private/${encodeURIComponent(id)}`, { headers: { Accept: 'application/json' }, cache: 'no-store' })
@@ -55,7 +56,8 @@ export async function getPrivateReport(id: string): Promise<{ report: Report; ex
   return { report: data.report, expiresAt: data.expiresAt ?? '' }
 }
 
-export const clearAlerts = (id: string) => post<{ ok: true; removed: number; message: string }>('/api/owner/clear-alerts', { id })
+export const clearAlerts = (id: string, code?: string) =>
+  post<{ ok: true; step: 'serve' | 'done'; code?: string; line?: string; proofUrl?: string; removed?: number; message?: string }>('/api/owner/clear-alerts', { id, ...(code ? { code } : {}) })
 
 export interface RegistryInfo {
   name: string

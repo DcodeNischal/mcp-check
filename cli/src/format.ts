@@ -152,13 +152,16 @@ export function webLink(url: string): string | undefined {
   return checkTarget(url).ok ? `${WEB}/?url=${encodeURIComponent(url)}` : undefined
 }
 
+// Newlines too: in the GitHub Action, a line starting with :: would be read as a workflow command.
+const safe = (s: string | undefined) => (s ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+
 function summaryLine(report: Report): string {
   const parts = [
     report.version && `spec ${report.version}${report.era ? ` (${ERA_LABEL[report.era] ?? report.era})` : ''}`,
     report.connected && !report.partial && `${report.tools.length} tool${report.tools.length === 1 ? '' : 's'}`,
     `checked in ${(report.durationMs / 1000).toFixed(1)}s`,
   ]
-  return parts.filter(Boolean).join(' · ')
+  return safe(parts.filter(Boolean).join(' · '))
 }
 
 function counts(checks: CheckResult[]) {
@@ -170,7 +173,6 @@ const sorted = (checks: CheckResult[]) =>
   [...checks].sort((a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category))
 
 /** Strip control characters from server-supplied text, so it can't send escape codes to the terminal. */
-const safe = (s: string | undefined) => (s ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '')
 
 export function renderText(report: Report, o: { color: boolean; verbose: boolean }, v?: Verdict): string {
   const paint = (code: string) => (s: string) => (o.color ? `\x1b[${code}m${s}\x1b[0m` : s)
@@ -200,7 +202,7 @@ export function renderText(report: Report, o: { color: boolean; verbose: boolean
   const link = webLink(report.url)
   if (link) out.push(`  ${dim('On the web:')} ${link}`)
   out.push('')
-  if (v && v.message !== 'Done.') out.push(v.exitCode === 0 ? tone.pass(v.message) : tone.fail(v.message), '')
+  if (v && v.message !== 'Done.') out.push(v.exitCode === 0 ? tone.pass(safe(v.message)) : tone.fail(safe(v.message)), '')
   return out.join('\n')
 }
 

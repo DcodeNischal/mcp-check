@@ -253,6 +253,23 @@ export const MIGRATIONS: string[][] = [
     // Whether a registry entry's namespace proves it belongs to the server's domain.
     `ALTER TABLE registry ADD COLUMN ns_match INTEGER NOT NULL DEFAULT 0`,
   ],
+  [
+    // A sign-in's code is exchanged at most once (replaying the callback does nothing).
+    `ALTER TABLE oauth_pending ADD COLUMN exchanging INTEGER NOT NULL DEFAULT 0`,
+    // One-time codes an owner must serve to clear their server's webhooks.
+    `CREATE TABLE IF NOT EXISTS owner_challenges (
+      nonce TEXT PRIMARY KEY,
+      server_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    // One webhook per visitor per server, enforced by the database (NULL subscribers are distinct).
+    `CREATE UNIQUE INDEX IF NOT EXISTS webhooks_one_per_subscriber ON webhooks (server_id, subscriber)`,
+    // Two registry entries with unproven namespaces claim the same server: show neither's details.
+    `ALTER TABLE registry ADD COLUMN contested INTEGER NOT NULL DEFAULT 0`,
+    // Reports made with credentials now live in private_reports only.
+    `DELETE FROM servers WHERE authenticated = 1 AND listed = 0`,
+  ],
 ]
 
 async function migrate(db: D1Database) {
@@ -266,7 +283,9 @@ async function migrate(db: D1Database) {
         if (!/duplicate column|already exists/i.test(String((err as Error)?.message ?? err))) throw err
       }
     }
-    await db.prepare(`INSERT INTO settings (key, value) VALUES ('schema_version', ?1) ON CONFLICT (key) DO UPDATE SET value = ?1`).bind(String(v + 1)).run()
+    // Never move the version backwards if another instance got further at the same time.
+    await db.prepare(`INSERT INTO settings (key, value) VALUES ('schema_version', ?1)
+                      ON CONFLICT (key) DO UPDATE SET value = CASE WHEN CAST(value AS INTEGER) < CAST(?1 AS INTEGER) THEN ?1 ELSE value END`).bind(String(v + 1)).run()
   }
 }
 
@@ -470,7 +489,8 @@ export async function recordFailure(db: D1Database, id: string): Promise<void> {
 
 /** The owner asked for removal: unlist, and never allow re-listing. */
 export async function blockServer(db: D1Database, id: string): Promise<void> {
-  await db.prepare(`UPDATE servers SET listed = 0, blocked = 1, updated_at = ?2 WHERE id = ?1`).bind(id, new Date().toISOString()).run()
+  // Already removed: nothing to write (anyone can repeat the request while the proof line is up).
+  await db.prepare(`UPDATE servers SET listed = 0, blocked = 1, updated_at = ?2 WHERE id = ?1 AND blocked = 0`).bind(id, new Date().toISOString()).run()
 }
 
 export async function serverUrl(db: D1Database, id: string): Promise<string | undefined> {

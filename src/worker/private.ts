@@ -7,16 +7,25 @@ import { ensureSchema, gunzip, gzip } from './store'
 export const PRIVATE_TTL_DAYS = 30
 export const PRIVATE_ID = /^[0-9a-f]{32}$/
 
-export async function savePrivateReport(db: D1Database, url: string, report: Report): Promise<{ id: string; expiresAt: string }> {
+/** Stored reports are capped so sharing can't fill the database. */
+export const PRIVATE_MAX_BYTES = 256 * 1024
+
+export class PrivateReportTooLarge extends Error {}
+
+/**
+ * Save a private report under an id derived from its receipt signature (which only this Worker can
+ * produce): unguessable, and sharing the same receipt again returns the same link and writes nothing.
+ */
+export async function savePrivateReport(db: D1Database, url: string, report: Report, receiptSig: string): Promise<{ id: string; expiresAt: string }> {
   await ensureSchema(db)
-  // 122 random bits: unguessable, unlike the /r/<id> of a public report (a hash of its URL).
-  const id = crypto.randomUUID().replace(/-/g, '')
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`private-report:${receiptSig}`)))
+  const id = [...digest.slice(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('')
+  const blob = await gzip(JSON.stringify({ ...report, url }))
+  if (blob.byteLength > PRIVATE_MAX_BYTES) throw new PrivateReportTooLarge('This report is too large to share privately.')
   const now = new Date()
-  await db
-    .prepare(`INSERT INTO private_reports (id, url, report, created_at) VALUES (?1, ?2, ?3, ?4)`)
-    .bind(id, url, await gzip(JSON.stringify({ ...report, url })), now.toISOString())
-    .run()
-  return { id, expiresAt: new Date(now.getTime() + PRIVATE_TTL_DAYS * 86_400_000).toISOString() }
+  await db.prepare(`INSERT OR IGNORE INTO private_reports (id, url, report, created_at) VALUES (?1, ?2, ?3, ?4)`).bind(id, url, blob, now.toISOString()).run()
+  const created = (await db.prepare(`SELECT created_at FROM private_reports WHERE id = ?1`).bind(id).first<string>('created_at')) ?? now.toISOString()
+  return { id, expiresAt: new Date(Date.parse(created) + PRIVATE_TTL_DAYS * 86_400_000).toISOString() }
 }
 
 export async function loadPrivateReport(db: D1Database, id: string): Promise<{ report: Report; expiresAt: string } | undefined> {

@@ -166,23 +166,38 @@ export async function subscribe(db: D1Database, serverId: string, url: string, o
   if (url.length > 1000) throw new WebhookError('That URL is too long.')
   const server = await db.prepare(`SELECT id, url, name FROM servers WHERE id = ?1 AND listed = 1 AND blocked = 0`).bind(serverId).first<{ id: string; url: string; name: string | null }>()
   if (!server) throw new WebhookError('Alerts are only available for servers listed in the directory.')
-  const count = await db.prepare(`SELECT COUNT(*) AS n FROM webhooks WHERE server_id = ?1 AND active = 1`).bind(serverId).first<number>('n')
-  if ((count ?? 0) >= MAX_WEBHOOKS_PER_SERVER) throw new WebhookError(`This server already has ${MAX_WEBHOOKS_PER_SERVER} webhooks.`)
-  const mine = await db.prepare(`SELECT COUNT(*) AS n FROM webhooks WHERE server_id = ?1 AND subscriber = ?2 AND active = 1`).bind(serverId, subscriber).first<number>('n')
-  if ((mine ?? 0) > 0) throw new WebhookError('You already have a webhook on this server. Remove it with its secret to add another.')
-
   const format = webhookFormat(url)
   const secret = randomSecret()
   const id = crypto.randomUUID()
+  const now = new Date()
+  // Reserve the slot first, in one statement, so parallel requests can't all pass the checks: the
+  // unique index allows one per visitor, and the insert only happens while the server has room.
+  // A disabled webhook of theirs, or a reservation left by a failed attempt, makes way.
+  await db
+    .prepare(`DELETE FROM webhooks WHERE server_id = ?1 AND subscriber = ?2 AND (active = 0 OR (active = 2 AND created_at < ?3))`)
+    .bind(serverId, subscriber, new Date(now.getTime() - 2 * 60_000).toISOString())
+    .run()
+  let reserved = 0
+  try {
+    const { meta } = await db
+      .prepare(`INSERT INTO webhooks (id, server_id, url, secret, format, active, failures, created_at, subscriber)
+                SELECT ?1, ?2, ?3, ?4, ?5, 2, 0, ?6, ?7 WHERE (SELECT COUNT(*) FROM webhooks WHERE server_id = ?2) < ?8`)
+      .bind(id, serverId, url, secret, format, now.toISOString(), subscriber, MAX_WEBHOOKS_PER_SERVER)
+      .run()
+    reserved = meta.changes
+  } catch (err) {
+    if (/unique/i.test(String((err as Error)?.message ?? err))) throw new WebhookError('You already have a webhook on this server. Remove it with its secret to add another.')
+    throw err
+  }
+  if (!reserved) throw new WebhookError(`This server already has ${MAX_WEBHOOKS_PER_SERVER} webhooks.`)
+
   const body = webhookBody(format, 'ping', origin, server)
   const status = await post(url, body, { 'X-MCP-Check-Event': 'ping', 'X-MCP-Check-Signature': `sha256=${await sign(secret, body)}` }, fetchImpl)
   if (!status || status < 200 || status >= 300) {
+    await db.prepare(`DELETE FROM webhooks WHERE id = ?1`).bind(id).run()
     throw new WebhookError(status ? `The test message got HTTP ${status}, so the webhook wasn't saved.` : "The test message couldn't be delivered, so the webhook wasn't saved.")
   }
-  await db
-    .prepare(`INSERT INTO webhooks (id, server_id, url, secret, format, active, failures, created_at, subscriber) VALUES (?1, ?2, ?3, ?4, ?5, 1, 0, ?6, ?7)`)
-    .bind(id, serverId, url, secret, format, new Date().toISOString(), subscriber)
-    .run()
+  await db.prepare(`UPDATE webhooks SET active = 1 WHERE id = ?1`).bind(id).run()
   return { id, secret, format }
 }
 

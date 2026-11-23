@@ -5,7 +5,7 @@ import { runCheck } from '../checks/run'
 import type { Report } from '../checks/types'
 import { LEGACY_VERSIONS, MODERN_VERSION } from '../mcp/types'
 import { searchServers, type SearchEnv } from './search'
-import { rateKey, targetKey } from './ratelimit'
+import { targetKey, withinLimit } from './ratelimit'
 import { storedStats } from './stats'
 import { canonicalUrl, loadReport, serverId } from './store'
 
@@ -34,8 +34,8 @@ export interface McpContext {
   env: McpServerEnv
   /** The visitor's IP, for the rate limit on checks. */
   ip?: string
-  /** A fetch that can reach this Worker's own hostname (for checking ourselves). */
-  fetch?: typeof fetch
+  /** A fetch for checking `target` (it can reach this Worker's own host and charges other hosts). */
+  fetchFor?: (target: string) => typeof fetch
 }
 
 // --- tools -----------------------------------------------------------------------------------
@@ -193,11 +193,12 @@ async function callTool(name: string, args: Json, ctx: McpContext): Promise<{ te
     case 'check_server': {
       const url = typeof args.url === 'string' ? args.url.trim() : ''
       if (!url) throw new ToolError('Give the server URL, for example https://mcp.example.com/mcp.')
-      const { success } = await env.CHECK_LIMITER.limit({ key: rateKey(ctx.ip) })
-      if (!success) throw new ToolError('Too many checks from your network. Try again in a minute.')
+      // Requests without a visitor IP come through MCP Check itself (the SELF binding), from a visitor
+      // request that was already rate-limited.
+      if (ctx.ip && !(await withinLimit(env.CHECK_LIMITER, ctx.ip))) throw new ToolError('Too many checks from your network. Try again in a minute.')
       const target = await env.CHECK_LIMITER.limit({ key: targetKey(url) })
       if (!target.success) throw new ToolError('That server is being checked a lot right now. Try again in a minute.')
-      const report = await runCheck(url, { vantage: "Cloudflare's network", ...(ctx.fetch ? { fetch: ctx.fetch } : {}) })
+      const report = await runCheck(url, { vantage: "Cloudflare's network", ...(ctx.fetchFor ? { fetch: ctx.fetchFor(url) } : {}) })
       if (!report.connected && !report.auth) throw new ToolError(`Couldn't check ${url}: ${report.error ?? 'it did not respond as an MCP server.'}`)
       const s = summarize(report, `${OWN_ORIGIN}/?url=${encodeURIComponent(url)}`)
       return { text: summaryText(s), structured: s }
@@ -205,8 +206,7 @@ async function callTool(name: string, args: Json, ctx: McpContext): Promise<{ te
     case 'search_servers': {
       const query = typeof args.query === 'string' ? args.query.trim().slice(0, 100) : ''
       if (query.length < 2) throw new ToolError('Give a search query of at least two characters.')
-      const limited = await env.CHECK_LIMITER.limit({ key: `search:${rateKey(ctx.ip)}` })
-      if (!limited.success) throw new ToolError('Too many searches. Try again in a minute.')
+      if (ctx.ip && !(await withinLimit(env.CHECK_LIMITER, ctx.ip, 'search'))) throw new ToolError('Too many searches. Try again in a minute.')
       const grade = typeof args.grade === 'string' && GRADES.includes(args.grade) ? args.grade : undefined
       const limit = Math.min(20, Math.max(1, Number.isInteger(args.limit) ? (args.limit as number) : 10))
       const found = await searchServers(env, { search: query, sort: 'relevance', page: 1, pageSize: limit, ...(grade ? { grade } : {}) })
