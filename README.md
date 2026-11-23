@@ -125,6 +125,21 @@ npx wrangler vectorize create mcp-servers --dimensions=384 --metric=cosine
 Without them, or if either fails or runs out of free quota, search uses keywords only. Searches are
 cached at the edge for a minute.
 
+## MCP server
+
+MCP Check is an MCP server too, at `https://mcp.nischaldhakal.com.np/mcp` (no sign-in). Add it to any MCP
+client to use it from your agent:
+
+| Tool | What it does |
+|---|---|
+| `check_server` | Grade a public MCP server and list every warning or failure with its fix |
+| `search_servers` | Search the directory by name, tool or meaning ("send email") |
+| `get_server` | The latest report for a server in the directory |
+| `directory_stats` | Grades, spec versions and the most-missed checks across the directory |
+
+It speaks 2026-07-28 and Streamable HTTP (2025-03-26 to 2025-11-25) without sessions, grades A on its own
+checks, and is pinned to the top of the directory. It checks itself once a day.
+
 ## Command line
 
 ```bash

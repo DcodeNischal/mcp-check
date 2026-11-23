@@ -95,6 +95,8 @@ export interface SearchQuery {
   sort?: 'relevance' | 'grade' | 'recent'
   page: number
   pageSize: number
+  /** A server to keep first whenever it's among the results. */
+  pinnedUrl?: string
 }
 
 export interface SearchResult {
@@ -156,6 +158,8 @@ export async function searchServers(env: SearchEnv, q: SearchQuery): Promise<Sea
   let rows = ranked.map((id) => byId.get(id)).filter((r) => r !== undefined)
   if (q.sort === 'grade') rows = rows.sort(GRADE_ORDER)
   else if (q.sort === 'recent') rows = rows.sort((a, b) => b.checked_at.localeCompare(a.checked_at))
+  // MCP Check's own server stays on top whenever it matches.
+  if (q.pinnedUrl) rows = [...rows.filter((r) => r.url === q.pinnedUrl), ...rows.filter((r) => r.url !== q.pinnedUrl)]
 
   const keywordSet = new Set(keyword)
   const start = (q.page - 1) * q.pageSize

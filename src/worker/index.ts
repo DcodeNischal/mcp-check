@@ -8,6 +8,7 @@ import type { Exchange } from '../mcp/types'
 import { gradeBadge, unknownBadge } from './badge'
 import { atomFeed, deliverPending, pruneEvents, recentEvents, subscribe, unsubscribe, WebhookError } from './alerts'
 import { hasProof, markVerified, proofUrl, reconfirmOwner, type ProofAction } from './owners'
+import { handleMcp, OWN_MCP_URL, OWN_ORIGIN } from './mcp-server'
 import { claimSignIn, clientMetadata, COOKIE, finishSignIn, PENDING_TTL_S, SignInError, startSignIn } from './oauth'
 import { claimAttempt, finishAttempt, nextCandidates, syncDue, syncStep, type QueuedServer } from './registry'
 import { refreshStatsIfDue, storedStats } from './stats'
@@ -27,6 +28,17 @@ export interface Env extends TurnstileEnv {
   ASSETS: Fetcher
   /** This Worker's own Checker entrypoint, so each queued check runs as its own invocation. */
   CHECKER?: Service<Checker>
+  /** This Worker itself, so checks can reach its own hostname (a Worker can't fetch its own domain). */
+  SELF?: Fetcher
+}
+
+/** fetch for checks: requests to MCP Check's own hostname go through the SELF binding. */
+function checkFetch(env: Env): typeof fetch {
+  const own = new URL(OWN_ORIGIN).host
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url)
+    return url.host === own && env.SELF ? env.SELF.fetch(new Request(input, init)) : fetch(input, init)
+  }) as typeof fetch
 }
 
 const app = new Hono<{ Bindings: Env }>()
@@ -35,6 +47,9 @@ const VANTAGE = "Cloudflare's network"
 const SITE_ORIGIN = 'https://mcp.nischaldhakal.com.np'
 
 app.get('/api/health', (c) => c.json({ ok: true }))
+
+// MCP Check's own MCP server (see src/worker/mcp-server.ts).
+app.all('/mcp', (c) => handleMcp(c.req.raw, { env: c.env, ip: c.req.header('CF-Connecting-IP'), fetch: checkFetch(c.env) }))
 
 // Headers a visitor may pass through to the server they're checking (auth and custom API keys).
 const FORBIDDEN_HEADERS = new Set(['host', 'content-length', 'content-type', 'accept', 'origin', 'cookie', 'connection', 'transfer-encoding', 'mcp-session-id', 'mcp-protocol-version', 'mcp-method', 'mcp-name'])
@@ -81,7 +96,7 @@ app.post('/api/check', async (c) => {
   const g = await guard(c, 'check')
   if (g.fail) return c.json({ ok: false, error: g.fail.error, message: g.fail.message }, g.fail.status)
   const log: Exchange[] = []
-  const report = await runCheck(g.body.url as string, { headers: g.headers, vantage: VANTAGE, logSink: log })
+  const report = await runCheck(g.body.url as string, { headers: g.headers, vantage: VANTAGE, logSink: log, fetch: checkFetch(c.env) })
   // A signed copy the visitor can hand back to /api/share: proof this Worker produced the grade.
   const receipt = report.connected || report.auth ? await signReport(c.env.DB, report) : undefined
   return c.json({ ok: true, report, log: trimLog(log), receipt }, 200, { 'Cache-Control': 'no-store' })
@@ -93,7 +108,7 @@ app.post('/api/call', async (c) => {
   const { tool, arguments: args } = g.body as { tool?: unknown; arguments?: unknown }
   if (typeof tool !== 'string' || !tool || tool.length > 256) return c.json({ ok: false, error: 'bad-request', message: 'Send the tool name.' }, 400)
   if (args !== undefined && (!args || typeof args !== 'object' || Array.isArray(args))) return c.json({ ok: false, error: 'bad-request', message: 'Arguments must be an object.' }, 400)
-  const outcome = await runTool(g.body.url as string, tool, (args ?? {}) as Record<string, unknown>, { headers: g.headers })
+  const outcome = await runTool(g.body.url as string, tool, (args ?? {}) as Record<string, unknown>, { headers: g.headers, fetch: checkFetch(c.env) })
   return c.json({ ...outcome, log: trimLog(outcome.log) }, 200, { 'Cache-Control': 'no-store' })
 })
 
@@ -179,7 +194,7 @@ app.get('/api/servers', async (c) => {
     const cached = await pageCache.match(pageKey)
     if (cached) return cached
     const sort = sortParam === 'recent' ? 'recent' : 'grade'
-    const result = await listServers(c.env.DB, { sort, page, ...gradeFilter })
+    const result = await listServers(c.env.DB, { sort, page, pinnedUrl: OWN_MCP_URL, ...gradeFilter })
     const res = c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
     c.executionCtx.waitUntil(pageCache.put(pageKey, res.clone()))
     return res
@@ -192,7 +207,7 @@ app.get('/api/servers', async (c) => {
   const hit = await cache.match(key)
   if (hit) return hit
   const sort = sortParam === 'recent' || sortParam === 'grade' ? sortParam : 'relevance'
-  const result = await searchServers(c.env, { search, sort, page, pageSize: PAGE_SIZE, ...gradeFilter })
+  const result = await searchServers(c.env, { search, sort, page, pageSize: PAGE_SIZE, pinnedUrl: OWN_MCP_URL, ...gradeFilter })
   const res = c.json({ ok: true, ...result, page, pageSize: PAGE_SIZE }, 200, { 'Cache-Control': 'public, max-age=60' })
   c.executionCtx.waitUntil(cache.put(key, res.clone()))
   return res
@@ -387,6 +402,7 @@ async function tick(env: Env) {
     (err) => console.error('embedding failed', String(err)),
   )
   await refreshStatsIfDue(env.DB).catch((err) => console.error('stats failed', String(err)))
+  await checkOwnServer(env).catch((err) => console.error('own server check failed', String(err)))
   if (await syncDue(env.DB)) {
     await syncStep(env.DB).then(
       (step) => console.log('registry sync', step),
@@ -404,6 +420,20 @@ async function tick(env: Env) {
     (n) => n && console.log('alerts delivered', n),
     (err) => console.error('alerts failed', String(err)),
   )
+}
+
+/** MCP Check's own MCP server is listed (pinned on top) and re-checked once a day. */
+async function checkOwnServer(env: Env) {
+  const id = await serverId(OWN_MCP_URL)
+  const last = await env.DB.prepare(`SELECT checked_at FROM servers WHERE id = ?1`).bind(id).first<string>('checked_at')
+  if (last && Date.now() - Date.parse(last) < 24 * 60 * 60 * 1000) return
+  const report = await runCheck(OWN_MCP_URL, { vantage: VANTAGE, fetch: checkFetch(env) })
+  if (!report.connected) return console.error('own server unreachable', report.error)
+  await saveReport(env.DB, id, OWN_MCP_URL, report, { list: true })
+  await env.DB.prepare(`UPDATE servers SET description = ?2, website_url = ?3, repository_url = ?4 WHERE id = ?1`)
+    .bind(id, "MCP Check's own server: check any MCP server against the spec, and search this directory, from your agent.", OWN_ORIGIN, 'https://github.com/DcodeNischal/mcp-check')
+    .run()
+  console.log('own server', report.grade, report.score)
 }
 
 /** Checks one queued server per call. The cron run calls it through a service binding to itself. */
@@ -436,7 +466,7 @@ async function checkNext(env: Env): Promise<boolean> {
 }
 
 async function checkQueued(env: Env, candidate: QueuedServer) {
-  const report = await runCheck(candidate.url, { vantage: VANTAGE })
+  const report = await runCheck(candidate.url, { vantage: VANTAGE, fetch: checkFetch(env) })
   const ok = report.connected || !!report.auth
   if (ok) {
     await saveReport(env.DB, candidate.id, candidate.url, report, {
@@ -453,7 +483,7 @@ async function recheck(env: Env) {
   const now = Date.now()
   const due = await dueForRecheck(env.DB, new Date(now - 7 * 86_400_000).toISOString(), new Date(now - 86_400_000).toISOString(), 1)
   for (const server of due) {
-    const report = await runCheck(server.url, { vantage: VANTAGE })
+    const report = await runCheck(server.url, { vantage: VANTAGE, fetch: checkFetch(env) })
     if (report.connected || report.auth) await saveReport(env.DB, server.id, server.url, report)
     else await recordFailure(env.DB, server.id)
     await reconfirmOwner(env.DB, server.id, server.url).catch((err) => console.error('owner reconfirm failed', String(err)))

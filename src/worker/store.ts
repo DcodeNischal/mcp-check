@@ -365,10 +365,18 @@ export interface DirectoryEntry {
 
 export const PAGE_SIZE = 30
 
-export async function listServers(db: D1Database, q: { search?: string; grade?: string; sort?: 'grade' | 'recent'; page?: number }): Promise<{ servers: DirectoryEntry[]; total: number }> {
+/**
+ * A page of the directory. `pinnedUrl` (MCP Check's own server) is always first on page 1, in any
+ * sort, when it matches the filters; it's left out of the sorted rows so it never appears twice.
+ */
+export async function listServers(db: D1Database, q: { search?: string; grade?: string; sort?: 'grade' | 'recent'; page?: number; pinnedUrl?: string }): Promise<{ servers: DirectoryEntry[]; total: number }> {
   await ensureSchema(db)
   const where = ['listed = 1', 'blocked = 0']
   const binds: unknown[] = []
+  if (q.pinnedUrl) {
+    where.push('url != ?')
+    binds.push(q.pinnedUrl)
+  }
   if (q.search) {
     // Escape LIKE wildcards so a search for "%" or "_" matches literally.
     const like = `%${q.search.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
@@ -381,11 +389,16 @@ export async function listServers(db: D1Database, q: { search?: string; grade?: 
   }
   const order = q.sort === 'recent' ? 'checked_at DESC' : 'grade ASC, partial ASC, score DESC, name ASC'
   const page = Math.max(1, q.page ?? 1)
-  const [rows, count] = await db.batch([
-    db.prepare(`SELECT id, url, name, grade, score, tools_count, spec_version, era, partial, auth_required, checked_at, description, owner_verified_at FROM servers WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`).bind(...binds),
+  const columns = 'id, url, name, grade, score, tools_count, spec_version, era, partial, auth_required, checked_at, description, owner_verified_at'
+  const [rows, count, pinned] = await db.batch([
+    db.prepare(`SELECT ${columns} FROM servers WHERE ${where.join(' AND ')} ORDER BY ${order} LIMIT ${PAGE_SIZE} OFFSET ${(page - 1) * PAGE_SIZE}`).bind(...binds),
     db.prepare(`SELECT COUNT(*) AS n FROM servers WHERE ${where.join(' AND ')}`).bind(...binds),
+    db.prepare(`SELECT ${columns} FROM servers WHERE url = ? AND listed = 1 AND blocked = 0 ${q.grade ? 'AND grade = ?' : ''}`)
+      .bind(...[q.pinnedUrl ?? '', ...(q.grade ? [q.grade] : [])]),
   ])
-  return { servers: (rows?.results ?? []) as DirectoryEntry[], total: Number((count?.results?.[0] as { n?: number } | undefined)?.n ?? 0) }
+  const top = q.pinnedUrl && !q.search ? ((pinned?.results ?? []) as DirectoryEntry[]) : []
+  const servers = [...(page === 1 ? top : []), ...((rows?.results ?? []) as DirectoryEntry[])]
+  return { servers, total: Number((count?.results?.[0] as { n?: number } | undefined)?.n ?? 0) + top.length }
 }
 
 /** Every listed server, for the sitemap. */

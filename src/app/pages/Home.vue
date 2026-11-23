@@ -12,7 +12,8 @@
     <div class="mt-10 max-w-3xl">
       <CheckForm ref="form" :busy="busy" :error="error" @submit="onSubmit" @signin="onSignIn" />
       <p v-if="!result && !busy" class="mt-6 text-xs text-silver">
-        Also in your terminal: <code class="font-mono text-white/80">npx @dcodenischal/mcp-check &lt;url&gt;</code>, and in CI as a
+        Also in your agent: add <code class="font-mono text-white/80">https://mcp.nischaldhakal.com.np/mcp</code> as an MCP server.
+        In your terminal: <code class="font-mono text-white/80">npx @dcodenischal/mcp-check &lt;url&gt;</code>. And in CI as a
         <a href="https://github.com/DcodeNischal/mcp-check#github-action" target="_blank" rel="noopener" class="text-white underline decoration-white/30 underline-offset-4 hover:decoration-white">GitHub Action</a>.
       </p>
     </div>
