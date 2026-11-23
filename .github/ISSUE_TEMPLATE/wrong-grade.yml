@@ -1,0 +1,25 @@
+name: Wrong grade or false positive
+description: A server is graded down for something it does correctly, or a check is wrong.
+labels: [grading]
+body:
+  - type: input
+    id: server
+    attributes:
+      label: Server URL or report link
+      placeholder: https://mcp.nischaldhakal.com.np/r/...
+    validations:
+      required: true
+  - type: input
+    id: check
+    attributes:
+      label: Which check
+      placeholder: e.g. "Rejects requests from other websites"
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it's wrong
+      description: What the server actually does, and the part of the MCP spec that supports it (a link is ideal).
+    validations:
+      required: true

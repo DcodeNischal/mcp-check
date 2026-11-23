@@ -1,0 +1,16 @@
+name: New check
+description: Suggest something MCP Check should grade.
+labels: [new check]
+body:
+  - type: textarea
+    id: rule
+    attributes:
+      label: What should be checked
+      description: The behaviour a good server has, and how MCP Check could test it from the outside.
+    validations:
+      required: true
+  - type: input
+    id: spec
+    attributes:
+      label: Where the spec says so
+      description: A link to the spec section (checks must trace back to the spec).
